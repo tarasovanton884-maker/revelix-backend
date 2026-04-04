@@ -19,10 +19,12 @@ function setCache(key, value, ttlMs) {
 function getCache(key, allowStale = false) {
   const entry = CACHE.get(key);
   if (!entry) return null;
+
   if (!allowStale && Date.now() > entry.expiresAt) {
     CACHE.delete(key);
     return null;
   }
+
   return entry.value;
 }
 
@@ -61,7 +63,7 @@ async function fetchJson(url, timeoutMs = 10000) {
     });
 
     if (response.status === 429) {
-      const error = new Error(`Request failed: 429 Too Many Requests`);
+      const error = new Error("Request failed: 429 Too Many Requests");
       error.status = 429;
       throw error;
     }
@@ -164,8 +166,21 @@ function calculateRangePosition(price, high, low) {
   return clamp(((price - low) / (high - low)) * 100, 0, 100);
 }
 
+function calculateVolumeRatio(klines) {
+  if (!Array.isArray(klines) || klines.length < 31) return 1;
+
+  const recent = klines.slice(-7).map((kline) => number(kline[7]));
+  const baseline = klines.slice(-30, -7).map((kline) => number(kline[7]));
+
+  const recentAvg = average(recent);
+  const baselineAvg = average(baseline);
+
+  if (!baselineAvg) return 1;
+  return recentAvg / baselineAvg;
+}
+
 const DASHBOARD_TTL = 30 * 1000;
-const MARKET_DATA_TTL = 60 * 1000;
+const MARKET_DATA_TTL = 30 * 1000;
 const BINANCE_TICKER_TTL = 30 * 1000;
 const BINANCE_KLINES_TTL = 30 * 1000;
 const COINGECKO_TTL = 3 * 60 * 60 * 1000;
@@ -185,6 +200,11 @@ async function fetchBinanceTicker24h() {
         return {
           lastPrice: 0,
           priceChangePercent: 0,
+          highPrice: 0,
+          lowPrice: 0,
+          quoteVolume: 0,
+          bidPrice: 0,
+          askPrice: 0,
         };
       }
 
@@ -228,6 +248,7 @@ async function fetchCoinGeckoGlobal() {
             market_cap_percentage: { btc: 0 },
             total_market_cap: { usd: 0 },
             total_volume: { usd: 0 },
+            market_cap_change_percentage_24h_usd: 0,
           },
         };
       }
@@ -278,13 +299,24 @@ async function getDashboardPayload() {
 
   const fear = fearGreed?.data?.[0] || {};
   const dominance = number(globalData?.data?.market_cap_percentage?.btc);
+  const marketCapChange24h = number(
+    globalData?.data?.market_cap_change_percentage_24h_usd ??
+    globalData?.data?.market_cap_change_24h ??
+    0
+  );
 
   return {
     symbol: "BTCUSDT",
     price: number(ticker?.lastPrice),
     change24hPct: number(ticker?.priceChangePercent),
+    high24h: number(ticker?.highPrice),
+    low24h: number(ticker?.lowPrice),
+    quoteVolume24h: number(ticker?.quoteVolume),
+    bidPrice: number(ticker?.bidPrice),
+    askPrice: number(ticker?.askPrice),
     updatedAt: new Date().toISOString(),
     dominanceBtcPct: dominance,
+    marketCapChange24h,
     fearGreed: {
       value: number(fear?.value),
       classification: fear?.value_classification || "Unknown",
@@ -315,6 +347,11 @@ async function getMarketDataPayload() {
   const dominance = number(globalData?.data?.market_cap_percentage?.btc);
   const marketCapUsd = number(globalData?.data?.total_market_cap?.usd);
   const volume24hUsd = number(globalData?.data?.total_volume?.usd);
+  const marketCapChange24h = number(
+    globalData?.data?.market_cap_change_percentage_24h_usd ??
+    globalData?.data?.market_cap_change_24h ??
+    0
+  );
 
   const k7 = getSlice(klines, 7);
   const k14 = getSlice(klines, 14);
@@ -350,10 +387,17 @@ async function getMarketDataPayload() {
   const nearTermHigh = recentHighCandidates.length ? Math.min(...recentHighCandidates) : high7d;
   const nearTermLow = recentLowCandidates.length ? Math.max(...recentLowCandidates) : low7d;
 
+  const volRatio = calculateVolumeRatio(klines);
+
   return {
     symbol: "BTCUSDT",
     price,
     change24hPct: number(ticker?.priceChangePercent),
+    high24h: number(ticker?.highPrice),
+    low24h: number(ticker?.lowPrice),
+    quoteVolume24h: number(ticker?.quoteVolume),
+    bidPrice: number(ticker?.bidPrice),
+    askPrice: number(ticker?.askPrice),
     updatedAt: new Date().toISOString(),
 
     fearGreed: {
@@ -363,8 +407,10 @@ async function getMarketDataPayload() {
     },
 
     dominanceBtcPct: dominance,
+    marketCapChange24h,
     marketCapUsd,
     volume24hUsd,
+    volRatio,
 
     high7d,
     low7d,
