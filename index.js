@@ -215,11 +215,13 @@ const DASHBOARD_TTL = 30 * 1000;
 const MARKET_DATA_TTL = 30 * 1000;
 const ORDER_FLOW_TTL = 30 * 1000;
 const MARKET_ADVANCED_TTL = 30 * 1000;
+const INTELLIGENCE_TTL = 30 * 1000;
 
 const BINANCE_TICKER_TTL = 30 * 1000;
 const BINANCE_KLINES_1D_TTL = 30 * 1000;
 const BINANCE_KLINES_4H_TTL = 30 * 1000;
 const BINANCE_KLINES_1W_TTL = 30 * 1000;
+const BINANCE_TRADES_TTL = 20 * 1000;
 
 const COINGECKO_TTL = 3 * 60 * 60 * 1000;
 const FEAR_GREED_TTL = 60 * 60 * 1000;
@@ -297,6 +299,24 @@ async function fetchBinanceKlinesWeekly(limit = 260) {
     async () => {
       const data = await fetchJsonWithStaleFallback(
         `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1w&limit=${limit}`,
+        cacheKey
+      );
+
+      return Array.isArray(data) ? data : [];
+    },
+    { allowStaleOnError: true }
+  );
+}
+
+async function fetchBinanceTrades(limit = 700) {
+  const cacheKey = `binance_trades_${limit}`;
+
+  return withCache(
+    cacheKey,
+    BINANCE_TRADES_TTL,
+    async () => {
+      const data = await fetchJsonWithStaleFallback(
+        `https://api.binance.com/api/v3/trades?symbol=BTCUSDT&limit=${limit}`,
         cacheKey
       );
 
@@ -629,29 +649,13 @@ async function getMarketAdvancedPayload() {
   const weekly = Array.isArray(weeklyRaw) ? weeklyRaw : [];
   const daily = Array.isArray(dailyRaw) ? dailyRaw : [];
 
-  const weeklyHighs = weekly
-    .map((candle) => number(candle[2]))
-    .filter((value) => Number.isFinite(value) && value > 0);
+  const weeklyHighs = weekly.map((candle) => number(candle[2])).filter((value) => Number.isFinite(value) && value > 0);
+  const weeklyLows = weekly.map((candle) => number(candle[3])).filter((value) => Number.isFinite(value) && value > 0);
+  const weeklyCloses = weekly.map((candle) => number(candle[4])).filter((value) => Number.isFinite(value) && value > 0);
 
-  const weeklyLows = weekly
-    .map((candle) => number(candle[3]))
-    .filter((value) => Number.isFinite(value) && value > 0);
-
-  const weeklyCloses = weekly
-    .map((candle) => number(candle[4]))
-    .filter((value) => Number.isFinite(value) && value > 0);
-
-  const dailyCloses = daily
-    .map((candle) => number(candle[4]))
-    .filter((value) => Number.isFinite(value) && value > 0);
-
-  const dailyHighs = daily
-    .map((candle) => number(candle[2]))
-    .filter((value) => Number.isFinite(value) && value > 0);
-
-  const dailyLows = daily
-    .map((candle) => number(candle[3]))
-    .filter((value) => Number.isFinite(value) && value > 0);
+  const dailyCloses = daily.map((candle) => number(candle[4])).filter((value) => Number.isFinite(value) && value > 0);
+  const dailyHighs = daily.map((candle) => number(candle[2])).filter((value) => Number.isFinite(value) && value > 0);
+  const dailyLows = daily.map((candle) => number(candle[3])).filter((value) => Number.isFinite(value) && value > 0);
 
   const price = number(ticker?.lastPrice);
   const change24h = number(ticker?.priceChangePercent);
@@ -696,17 +700,9 @@ async function getMarketAdvancedPayload() {
     yearlyLow + yearlyRange * 0.84,
   ]);
 
-  if (accumulationUpper <= deepValueUpper) {
-    accumulationUpper = deepValueUpper * 1.08;
-  }
-
-  if (fairValueUpper <= accumulationUpper) {
-    fairValueUpper = accumulationUpper * 1.12;
-  }
-
-  if (premiumUpper <= fairValueUpper) {
-    premiumUpper = fairValueUpper * 1.14;
-  }
+  if (accumulationUpper <= deepValueUpper) accumulationUpper = deepValueUpper * 1.08;
+  if (fairValueUpper <= accumulationUpper) fairValueUpper = accumulationUpper * 1.12;
+  if (premiumUpper <= fairValueUpper) premiumUpper = fairValueUpper * 1.14;
 
   const safeZoneUpper = average([
     ma200w * 0.98,
@@ -781,6 +777,153 @@ async function getMarketAdvancedPayload() {
   };
 }
 
+async function getIntelligencePayload() {
+  const [tickerResult, tradesResult, weeklyResult] = await Promise.allSettled([
+    fetchBinanceTicker24h(),
+    fetchBinanceTrades(700),
+    fetchBinanceKlinesWeekly(260),
+  ]);
+
+  const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
+  const tradesRaw = tradesResult.status === "fulfilled" ? tradesResult.value : [];
+  const weeklyRaw = weeklyResult.status === "fulfilled" ? weeklyResult.value : [];
+
+  const trades = Array.isArray(tradesRaw) ? tradesRaw : [];
+  const weekly = Array.isArray(weeklyRaw) ? weeklyRaw : [];
+
+  let buyPressure = 0;
+  let sellPressure = 0;
+
+  let largeBuyValue = 0;
+  let largeSellValue = 0;
+
+  let whaleBuyValue = 0;
+  let whaleSellValue = 0;
+
+  let institutionalBuyValue = 0;
+  let institutionalSellValue = 0;
+
+  trades.forEach((trade) => {
+    const qty = number(trade?.qty);
+    const price = number(trade?.price);
+    const value = qty * price;
+
+    if (trade?.isBuyerMaker) {
+      sellPressure += qty;
+    } else {
+      buyPressure += qty;
+    }
+
+    if (value >= 30000) {
+      if (trade?.isBuyerMaker) {
+        largeSellValue += value;
+      } else {
+        largeBuyValue += value;
+      }
+    }
+
+    if (value >= 100000) {
+      if (trade?.isBuyerMaker) {
+        whaleSellValue += value;
+      } else {
+        whaleBuyValue += value;
+      }
+    }
+
+    if (value >= 500000) {
+      if (trade?.isBuyerMaker) {
+        institutionalSellValue += value;
+      } else {
+        institutionalBuyValue += value;
+      }
+    }
+  });
+
+  const highs = weekly
+    .map((candle) => number(candle[2]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  const lows = weekly
+    .map((candle) => number(candle[3]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  const closes = weekly
+    .map((candle) => number(candle[4]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  const closes52 = closes.slice(-52);
+  const sortedCloses52 = [...closes52].sort((a, b) => a - b);
+
+  const yearlyHigh = highs.length ? Math.max(...highs.slice(-52)) : 0;
+  const yearlyLow = lows.length ? Math.min(...lows.slice(-52)) : 0;
+
+  const last200Weeks = closes.slice(-200);
+  const ma200w = average(last200Weeks);
+
+  const p20 = getPercentile(sortedCloses52, 0.2);
+  const p40 = getPercentile(sortedCloses52, 0.4);
+  const p60 = getPercentile(sortedCloses52, 0.6);
+  const p80 = getPercentile(sortedCloses52, 0.8);
+
+  const yearlyRange = yearlyHigh - yearlyLow;
+
+  let deepValueUpper = average([
+    p20,
+    ma200w * 0.95,
+    yearlyLow + yearlyRange * 0.22,
+  ]);
+
+  let accumulationUpper = average([
+    p40,
+    ma200w * 1.08,
+    yearlyLow + yearlyRange * 0.4,
+  ]);
+
+  let fairValueUpper = average([
+    p60,
+    ma200w * 1.35,
+    yearlyLow + yearlyRange * 0.62,
+  ]);
+
+  let premiumUpper = average([
+    p80,
+    ma200w * 1.75,
+    yearlyLow + yearlyRange * 0.84,
+  ]);
+
+  if (accumulationUpper <= deepValueUpper) {
+    accumulationUpper = deepValueUpper * 1.08;
+  }
+
+  if (fairValueUpper <= accumulationUpper) {
+    fairValueUpper = accumulationUpper * 1.12;
+  }
+
+  if (premiumUpper <= fairValueUpper) {
+    premiumUpper = fairValueUpper * 1.14;
+  }
+
+  return {
+    price: number(ticker?.lastPrice),
+    change24h: number(ticker?.priceChangePercent),
+    buyPressure,
+    sellPressure,
+    largeBuyValue,
+    largeSellValue,
+    whaleBuyValue,
+    whaleSellValue,
+    institutionalBuyValue,
+    institutionalSellValue,
+    yearlyHigh,
+    yearlyLow,
+    ma200w,
+    deepValueUpper,
+    accumulationUpper,
+    fairValueUpper,
+    premiumUpper,
+  };
+}
+
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
@@ -791,6 +934,7 @@ app.get("/", (_req, res) => {
       "/api/market-data",
       "/api/order-flow",
       "/api/market-advanced",
+      "/api/intelligence",
     ],
   });
 });
@@ -847,6 +991,18 @@ app.get("/api/market-advanced", async (_req, res) => {
   } catch (error) {
     console.error("Market advanced endpoint failed:", error);
     res.status(500).json({ ok: false, error: "Failed to load market advanced data" });
+  }
+});
+
+app.get("/api/intelligence", async (_req, res) => {
+  try {
+    const data = await withCache("intelligence", INTELLIGENCE_TTL, getIntelligencePayload, {
+      allowStaleOnError: true,
+    });
+    res.json(data);
+  } catch (error) {
+    console.error("Intelligence endpoint failed:", error);
+    res.status(500).json({ ok: false, error: "Failed to load intelligence data" });
   }
 });
 
