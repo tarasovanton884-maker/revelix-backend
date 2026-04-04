@@ -198,12 +198,29 @@ function getCloseAtOffset(closes, offsetFromEnd) {
   return closes[closes.length - 1 - offsetFromEnd];
 }
 
+function getPercentile(sortedValues, percentile) {
+  if (!Array.isArray(sortedValues) || !sortedValues.length) return 0;
+
+  const index = (sortedValues.length - 1) * percentile;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+
+  if (lower === upper) return sortedValues[lower];
+
+  const weight = index - lower;
+  return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight;
+}
+
 const DASHBOARD_TTL = 30 * 1000;
 const MARKET_DATA_TTL = 30 * 1000;
 const ORDER_FLOW_TTL = 30 * 1000;
+const MARKET_ADVANCED_TTL = 30 * 1000;
+
 const BINANCE_TICKER_TTL = 30 * 1000;
 const BINANCE_KLINES_1D_TTL = 30 * 1000;
 const BINANCE_KLINES_4H_TTL = 30 * 1000;
+const BINANCE_KLINES_1W_TTL = 30 * 1000;
+
 const COINGECKO_TTL = 3 * 60 * 60 * 1000;
 const FEAR_GREED_TTL = 60 * 60 * 1000;
 
@@ -262,6 +279,24 @@ async function fetchBinanceKlines4h(limit = 180) {
     async () => {
       const data = await fetchJsonWithStaleFallback(
         `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=${limit}`,
+        cacheKey
+      );
+
+      return Array.isArray(data) ? data : [];
+    },
+    { allowStaleOnError: true }
+  );
+}
+
+async function fetchBinanceKlinesWeekly(limit = 260) {
+  const cacheKey = `binance_klines_1w_${limit}`;
+
+  return withCache(
+    cacheKey,
+    BINANCE_KLINES_1W_TTL,
+    async () => {
+      const data = await fetchJsonWithStaleFallback(
+        `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1w&limit=${limit}`,
         cacheKey
       );
 
@@ -521,24 +556,21 @@ async function getOrderFlowPayload() {
     const high = number(candle[2]);
     const low = number(candle[3]);
     const close = number(candle[4]);
-    if (!close) return 0;
-    return ((high - low) / close) * 100;
+    return close > 0 ? ((high - low) / close) * 100 : 0;
   });
 
   const h4RangesPct30 = h4.slice(-30).map((candle) => {
     const high = number(candle[2]);
     const low = number(candle[3]);
     const close = number(candle[4]);
-    if (!close) return 0;
-    return ((high - low) / close) * 100;
+    return close > 0 ? ((high - low) / close) * 100 : 0;
   });
 
   const dailyRangesPct7 = daily.slice(-7).map((candle) => {
     const high = number(candle[2]);
     const low = number(candle[3]);
     const close = number(candle[4]);
-    if (!close) return 0;
-    return ((high - low) / close) * 100;
+    return close > 0 ? ((high - low) / close) * 100 : 0;
   });
 
   const perf7d = percentChange(price, prev7d);
@@ -583,11 +615,183 @@ async function getOrderFlowPayload() {
   };
 }
 
+async function getMarketAdvancedPayload() {
+  const [tickerResult, weeklyResult, dailyResult] = await Promise.allSettled([
+    fetchBinanceTicker24h(),
+    fetchBinanceKlinesWeekly(260),
+    fetchBinanceKlinesDaily(400),
+  ]);
+
+  const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
+  const weeklyRaw = weeklyResult.status === "fulfilled" ? weeklyResult.value : [];
+  const dailyRaw = dailyResult.status === "fulfilled" ? dailyResult.value : [];
+
+  const weekly = Array.isArray(weeklyRaw) ? weeklyRaw : [];
+  const daily = Array.isArray(dailyRaw) ? dailyRaw : [];
+
+  const weeklyHighs = weekly
+    .map((candle) => number(candle[2]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  const weeklyLows = weekly
+    .map((candle) => number(candle[3]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  const weeklyCloses = weekly
+    .map((candle) => number(candle[4]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  const dailyCloses = daily
+    .map((candle) => number(candle[4]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  const dailyHighs = daily
+    .map((candle) => number(candle[2]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  const dailyLows = daily
+    .map((candle) => number(candle[3]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  const price = number(ticker?.lastPrice);
+  const change24h = number(ticker?.priceChangePercent);
+
+  const closes52 = weeklyCloses.slice(-52);
+  const sortedCloses52 = [...closes52].sort((a, b) => a - b);
+
+  const yearlyHigh = maxOf(weeklyHighs.slice(-52));
+  const yearlyLow = minOf(weeklyLows.slice(-52));
+  const ath = maxOf(weeklyHighs);
+  const drawdown = ath > 0 ? ((price - ath) / ath) * 100 : 0;
+  const ma200w = average(weeklyCloses.slice(-200));
+
+  const p20 = getPercentile(sortedCloses52, 0.2);
+  const p40 = getPercentile(sortedCloses52, 0.4);
+  const p60 = getPercentile(sortedCloses52, 0.6);
+  const p80 = getPercentile(sortedCloses52, 0.8);
+
+  const yearlyRange = yearlyHigh - yearlyLow;
+
+  let deepValueUpper = average([
+    p20,
+    ma200w * 0.95,
+    yearlyLow + yearlyRange * 0.22,
+  ]);
+
+  let accumulationUpper = average([
+    p40,
+    ma200w * 1.08,
+    yearlyLow + yearlyRange * 0.40,
+  ]);
+
+  let fairValueUpper = average([
+    p60,
+    ma200w * 1.35,
+    yearlyLow + yearlyRange * 0.62,
+  ]);
+
+  let premiumUpper = average([
+    p80,
+    ma200w * 1.75,
+    yearlyLow + yearlyRange * 0.84,
+  ]);
+
+  if (accumulationUpper <= deepValueUpper) {
+    accumulationUpper = deepValueUpper * 1.08;
+  }
+
+  if (fairValueUpper <= accumulationUpper) {
+    fairValueUpper = accumulationUpper * 1.12;
+  }
+
+  if (premiumUpper <= fairValueUpper) {
+    premiumUpper = fairValueUpper * 1.14;
+  }
+
+  const safeZoneUpper = average([
+    ma200w * 0.98,
+    accumulationUpper,
+    yearlyLow + yearlyRange * 0.34,
+  ]);
+
+  const strongValueUpper = average([
+    ma200w * 0.90,
+    deepValueUpper,
+    yearlyLow + yearlyRange * 0.24,
+  ]);
+
+  const deepValueBuyUpper = average([
+    ma200w * 0.80,
+    yearlyLow + yearlyRange * 0.16,
+  ]);
+
+  const extremeValueUpper = average([
+    ath * 0.50,
+    ma200w * 0.72,
+    yearlyLow + yearlyRange * 0.08,
+  ]);
+
+  const panicValueUpper = average([
+    ath * 0.30,
+    ma200w * 0.58,
+    yearlyLow + yearlyRange * 0.03,
+  ]);
+
+  const prev7d = getCloseAtOffset(dailyCloses, 7);
+  const prev30d = getCloseAtOffset(dailyCloses, 30);
+  const prev90d = getCloseAtOffset(dailyCloses, 90);
+  const prev180d = getCloseAtOffset(dailyCloses, 180);
+  const prev365d = getCloseAtOffset(dailyCloses, 365);
+
+  return {
+    price,
+    change24h,
+    yearlyHigh,
+    yearlyLow,
+    ath,
+    drawdown,
+    ma200w,
+    deepValueUpper,
+    accumulationUpper,
+    fairValueUpper,
+    premiumUpper,
+    safeZoneUpper,
+    strongValueUpper,
+    deepValueBuyUpper,
+    extremeValueUpper,
+    panicValueUpper,
+    perf24h: change24h,
+    perf7d: percentChange(price, prev7d),
+    perf30d: percentChange(price, prev30d),
+    perf90d: percentChange(price, prev90d),
+    perf180d: percentChange(price, prev180d),
+    perf1y: percentChange(price, prev365d),
+    range24hLow: number(ticker?.lowPrice),
+    range24hHigh: number(ticker?.highPrice),
+    range7dLow: minOf(dailyLows.slice(-7)),
+    range7dHigh: maxOf(dailyHighs.slice(-7)),
+    range30dLow: minOf(dailyLows.slice(-30)),
+    range30dHigh: maxOf(dailyHighs.slice(-30)),
+    range90dLow: minOf(dailyLows.slice(-90)),
+    range90dHigh: maxOf(dailyHighs.slice(-90)),
+    range180dLow: minOf(dailyLows.slice(-180)),
+    range180dHigh: maxOf(dailyHighs.slice(-180)),
+    range1yLow: minOf(dailyLows.slice(-365)),
+    range1yHigh: maxOf(dailyHighs.slice(-365)),
+  };
+}
+
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
     name: "Revelix Backend",
-    endpoints: ["/health", "/api/dashboard", "/api/market-data", "/api/order-flow"],
+    endpoints: [
+      "/health",
+      "/api/dashboard",
+      "/api/market-data",
+      "/api/order-flow",
+      "/api/market-advanced",
+    ],
   });
 });
 
@@ -631,6 +835,18 @@ app.get("/api/order-flow", async (_req, res) => {
   } catch (error) {
     console.error("Order flow endpoint failed:", error);
     res.status(500).json({ ok: false, error: "Failed to load order flow data" });
+  }
+});
+
+app.get("/api/market-advanced", async (_req, res) => {
+  try {
+    const data = await withCache("market-advanced", MARKET_ADVANCED_TTL, getMarketAdvancedPayload, {
+      allowStaleOnError: true,
+    });
+    res.json(data);
+  } catch (error) {
+    console.error("Market advanced endpoint failed:", error);
+    res.status(500).json({ ok: false, error: "Failed to load market advanced data" });
   }
 });
 
