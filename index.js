@@ -226,6 +226,27 @@ const BINANCE_TRADES_TTL = 20 * 1000;
 const COINGECKO_TTL = 3 * 60 * 60 * 1000;
 const FEAR_GREED_TTL = 60 * 60 * 1000;
 
+const BTC_CIRCULATING_SUPPLY = 19_600_000;
+
+function calculateBtcCapitalFlow24hUsd(ticker) {
+  const currentPrice = number(ticker?.lastPrice);
+  const changePct = number(ticker?.priceChangePercent);
+
+  if (!currentPrice || !Number.isFinite(changePct) || changePct <= -99.9) {
+    return 0;
+  }
+
+  const previousPrice = currentPrice / (1 + changePct / 100);
+  if (!previousPrice || !Number.isFinite(previousPrice)) {
+    return 0;
+  }
+
+  const currentMarketCap = currentPrice * BTC_CIRCULATING_SUPPLY;
+  const previousMarketCap = previousPrice * BTC_CIRCULATING_SUPPLY;
+
+  return currentMarketCap - previousMarketCap;
+}
+
 async function fetchBinanceTicker24h() {
   return withCache(
     "binance_ticker_24h",
@@ -398,6 +419,7 @@ async function getDashboardPayload() {
     globalData?.data?.market_cap_change_24h ??
     0
   );
+  const btcFlow24hUsd = calculateBtcCapitalFlow24hUsd(ticker);
 
   return {
     symbol: "BTCUSDT",
@@ -411,6 +433,7 @@ async function getDashboardPayload() {
     updatedAt: new Date().toISOString(),
     dominanceBtcPct: dominance,
     marketCapChange24h,
+    btcFlow24hUsd,
     fearGreed: {
       value: number(fear?.value),
       classification: fear?.value_classification || "Unknown",
@@ -446,6 +469,7 @@ async function getMarketDataPayload() {
     globalData?.data?.market_cap_change_24h ??
     0
   );
+  const btcFlow24hUsd = calculateBtcCapitalFlow24hUsd(ticker);
 
   const k7 = getSlice(klines, 7);
   const k14 = getSlice(klines, 14);
@@ -502,6 +526,7 @@ async function getMarketDataPayload() {
 
     dominanceBtcPct: dominance,
     marketCapChange24h,
+    btcFlow24hUsd,
     marketCapUsd,
     volume24hUsd,
     volRatio,
