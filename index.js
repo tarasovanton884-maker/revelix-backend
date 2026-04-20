@@ -12,6 +12,8 @@ const CACHE = new Map();
 const INTELLIGENCE_STATE = {
   stableBias: "Neutral",
   stableAttractiveness: 5,
+  pendingBias: null,
+  pendingBiasCount: 0,
   lastUpdatedAt: 0,
 };
 
@@ -223,51 +225,92 @@ function ratioScore(buyValue, sellValue) {
   return ((buyValue - sellValue) / total) * 100;
 }
 
-function smoothValue(previous, current, alpha = 0.35) {
+function smoothValue(previous, current, alpha = 0.22) {
   if (!Number.isFinite(previous)) return current;
   if (!Number.isFinite(current)) return previous;
   return previous * (1 - alpha) + current * alpha;
 }
 
-function determineInvestorBias({
-  price,
-  deepValueUpper,
-  accumulationUpper,
-  fairValueUpper,
-  premiumUpper,
-  flowScore,
-  whaleScore,
-  institutionalScore,
+function getValuationZone(price, levels) {
+  const {
+    deepValueUpper,
+    accumulationUpper,
+    fairValueUpper,
+    premiumUpper,
+  } = levels;
+
+  if (price <= deepValueUpper) return "deep_value";
+  if (price <= accumulationUpper) return "accumulation";
+  if (price <= fairValueUpper) return "fair_value";
+  if (price <= premiumUpper) return "premium";
+  return "overheated";
+}
+
+function determineInvestorBiasCandidate({
+  valuationZone,
+  combinedFlowScore,
   previousBias,
 }) {
-  const combinedFlow = average([flowScore, whaleScore, institutionalScore]);
   let nextBias = "Neutral";
 
-  if (price <= deepValueUpper && combinedFlow >= -8) {
-    nextBias = "Deep Value";
-  } else if (price <= accumulationUpper && combinedFlow >= -12) {
-    nextBias = "Accumulation";
-  } else if (price <= fairValueUpper && combinedFlow > -18) {
-    nextBias = "Fair Value";
-  } else if (price >= premiumUpper || combinedFlow <= -35) {
-    nextBias = "Distribution Risk";
+  if (valuationZone === "deep_value") {
+    nextBias = combinedFlowScore >= -20 ? "Deep Value" : "Accumulation";
+  } else if (valuationZone === "accumulation") {
+    nextBias = combinedFlowScore >= -22 ? "Accumulation" : "Fair Value";
+  } else if (valuationZone === "fair_value") {
+    if (combinedFlowScore <= -40) {
+      nextBias = "Distribution Risk";
+    } else if (combinedFlowScore >= 26) {
+      nextBias = "Accumulation";
+    } else {
+      nextBias = "Fair Value";
+    }
+  } else if (valuationZone === "premium") {
+    nextBias = combinedFlowScore <= -22 ? "Distribution Risk" : "Fair Value";
   } else {
-    nextBias = "Caution";
+    nextBias = "Distribution Risk";
   }
 
+  // Не даём прыгать напрямую между крайностями
   if (previousBias === "Accumulation" && nextBias === "Distribution Risk") {
-    if (!(price >= premiumUpper && combinedFlow <= -40)) {
-      return "Caution";
-    }
+    return "Fair Value";
   }
 
   if (previousBias === "Distribution Risk" && nextBias === "Accumulation") {
-    if (!(price <= accumulationUpper && combinedFlow >= 10)) {
-      return "Caution";
-    }
+    return "Fair Value";
+  }
+
+  if (previousBias === "Deep Value" && nextBias === "Distribution Risk") {
+    return "Fair Value";
   }
 
   return nextBias;
+}
+
+function applyBiasConfirmation(candidateBias) {
+  const currentStable = INTELLIGENCE_STATE.stableBias;
+
+  if (candidateBias === currentStable) {
+    INTELLIGENCE_STATE.pendingBias = null;
+    INTELLIGENCE_STATE.pendingBiasCount = 0;
+    return currentStable;
+  }
+
+  if (INTELLIGENCE_STATE.pendingBias === candidateBias) {
+    INTELLIGENCE_STATE.pendingBiasCount += 1;
+  } else {
+    INTELLIGENCE_STATE.pendingBias = candidateBias;
+    INTELLIGENCE_STATE.pendingBiasCount = 1;
+  }
+
+  if (INTELLIGENCE_STATE.pendingBiasCount >= 2) {
+    INTELLIGENCE_STATE.stableBias = candidateBias;
+    INTELLIGENCE_STATE.pendingBias = null;
+    INTELLIGENCE_STATE.pendingBiasCount = 0;
+    return candidateBias;
+  }
+
+  return currentStable;
 }
 
 function calculateInvestorAttractiveness({
@@ -296,9 +339,9 @@ function calculateInvestorAttractiveness({
   }
 
   const combinedFlow = average([flowScore, whaleScore, institutionalScore]);
-  score += clamp(combinedFlow / 25, -2.2, 2.2);
+  score += clamp(combinedFlow / 35, -1.5, 1.5);
 
-  const smoothed = smoothValue(previousStableAttractiveness, score, 0.35);
+  const smoothed = smoothValue(previousStableAttractiveness, score, 0.22);
   return clamp(smoothed, 1, 10);
 }
 
@@ -1030,7 +1073,16 @@ async function getIntelligencePayload() {
   const whaleScore = clamp(whaleScoreRaw, -100, 100);
   const institutionalScore = clamp(institutionalScoreRaw, -100, 100);
 
-  const investorAttractiveness = calculateInvestorAttractiveness({
+  const combinedFlowScore = average([flowScore, whaleScore, institutionalScore]);
+
+  const valuationZone = getValuationZone(price, {
+    deepValueUpper,
+    accumulationUpper,
+    fairValueUpper,
+    premiumUpper,
+  });
+
+  const rawInvestorAttractiveness = calculateInvestorAttractiveness({
     price,
     deepValueUpper,
     accumulationUpper,
@@ -1042,26 +1094,20 @@ async function getIntelligencePayload() {
     previousStableAttractiveness: INTELLIGENCE_STATE.stableAttractiveness,
   });
 
-  const investorBias = determineInvestorBias({
-    price,
-    deepValueUpper,
-    accumulationUpper,
-    fairValueUpper,
-    premiumUpper,
-    flowScore,
-    whaleScore,
-    institutionalScore,
+  const candidateBias = determineInvestorBiasCandidate({
+    valuationZone,
+    combinedFlowScore,
     previousBias: INTELLIGENCE_STATE.stableBias,
   });
 
-  INTELLIGENCE_STATE.stableAttractiveness = investorAttractiveness;
-  INTELLIGENCE_STATE.stableBias = investorBias;
+  const stableBias = applyBiasConfirmation(candidateBias);
+
+  INTELLIGENCE_STATE.stableAttractiveness = rawInvestorAttractiveness;
   INTELLIGENCE_STATE.lastUpdatedAt = Date.now();
 
   return {
     price,
     change24h,
-
     buyPressure,
     sellPressure,
     largeBuyValue,
@@ -1070,7 +1116,6 @@ async function getIntelligencePayload() {
     whaleSellValue,
     institutionalBuyValue,
     institutionalSellValue,
-
     yearlyHigh,
     yearlyLow,
     ma200w,
@@ -1078,15 +1123,16 @@ async function getIntelligencePayload() {
     accumulationUpper,
     fairValueUpper,
     premiumUpper,
-
-    flowScore,
-    whaleScore,
-    institutionalScore,
-
-    investorAttractiveness: Number(investorAttractiveness.toFixed(1)),
-    investorBias,
-
+    investorAttractiveness: Number(rawInvestorAttractiveness.toFixed(1)),
+    investorBias: stableBias,
     stability: {
+      valuationZone,
+      flowScore: Number(flowScore.toFixed(2)),
+      whaleScore: Number(whaleScore.toFixed(2)),
+      institutionalScore: Number(institutionalScore.toFixed(2)),
+      combinedFlowScore: Number(combinedFlowScore.toFixed(2)),
+      pendingBias: INTELLIGENCE_STATE.pendingBias,
+      pendingBiasCount: INTELLIGENCE_STATE.pendingBiasCount,
       stableBias: INTELLIGENCE_STATE.stableBias,
       stableAttractiveness: Number(INTELLIGENCE_STATE.stableAttractiveness.toFixed(1)),
       lastUpdatedAt: new Date(INTELLIGENCE_STATE.lastUpdatedAt).toISOString(),
