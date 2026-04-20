@@ -9,6 +9,12 @@ app.use(express.json());
 
 const CACHE = new Map();
 
+const INTELLIGENCE_STATE = {
+  stableBias: "Neutral",
+  stableAttractiveness: 5,
+  lastUpdatedAt: 0,
+};
+
 function setCache(key, value, ttlMs) {
   CACHE.set(key, {
     value,
@@ -211,6 +217,91 @@ function getPercentile(sortedValues, percentile) {
   return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight;
 }
 
+function ratioScore(buyValue, sellValue) {
+  const total = buyValue + sellValue;
+  if (!total) return 0;
+  return ((buyValue - sellValue) / total) * 100;
+}
+
+function smoothValue(previous, current, alpha = 0.35) {
+  if (!Number.isFinite(previous)) return current;
+  if (!Number.isFinite(current)) return previous;
+  return previous * (1 - alpha) + current * alpha;
+}
+
+function determineInvestorBias({
+  price,
+  deepValueUpper,
+  accumulationUpper,
+  fairValueUpper,
+  premiumUpper,
+  flowScore,
+  whaleScore,
+  institutionalScore,
+  previousBias,
+}) {
+  const combinedFlow = average([flowScore, whaleScore, institutionalScore]);
+  let nextBias = "Neutral";
+
+  if (price <= deepValueUpper && combinedFlow >= -8) {
+    nextBias = "Deep Value";
+  } else if (price <= accumulationUpper && combinedFlow >= -12) {
+    nextBias = "Accumulation";
+  } else if (price <= fairValueUpper && combinedFlow > -18) {
+    nextBias = "Fair Value";
+  } else if (price >= premiumUpper || combinedFlow <= -35) {
+    nextBias = "Distribution Risk";
+  } else {
+    nextBias = "Caution";
+  }
+
+  if (previousBias === "Accumulation" && nextBias === "Distribution Risk") {
+    if (!(price >= premiumUpper && combinedFlow <= -40)) {
+      return "Caution";
+    }
+  }
+
+  if (previousBias === "Distribution Risk" && nextBias === "Accumulation") {
+    if (!(price <= accumulationUpper && combinedFlow >= 10)) {
+      return "Caution";
+    }
+  }
+
+  return nextBias;
+}
+
+function calculateInvestorAttractiveness({
+  price,
+  deepValueUpper,
+  accumulationUpper,
+  fairValueUpper,
+  premiumUpper,
+  flowScore,
+  whaleScore,
+  institutionalScore,
+  previousStableAttractiveness,
+}) {
+  let score = 5;
+
+  if (price <= deepValueUpper) {
+    score += 2.0;
+  } else if (price <= accumulationUpper) {
+    score += 1.2;
+  } else if (price <= fairValueUpper) {
+    score += 0.3;
+  } else if (price >= premiumUpper) {
+    score -= 1.8;
+  } else {
+    score -= 0.6;
+  }
+
+  const combinedFlow = average([flowScore, whaleScore, institutionalScore]);
+  score += clamp(combinedFlow / 25, -2.2, 2.2);
+
+  const smoothed = smoothValue(previousStableAttractiveness, score, 0.35);
+  return clamp(smoothed, 1, 10);
+}
+
 const DASHBOARD_TTL = 30 * 1000;
 const MARKET_DATA_TTL = 30 * 1000;
 const ORDER_FLOW_TTL = 30 * 1000;
@@ -221,7 +312,7 @@ const BINANCE_TICKER_TTL = 30 * 1000;
 const BINANCE_KLINES_1D_TTL = 30 * 1000;
 const BINANCE_KLINES_4H_TTL = 30 * 1000;
 const BINANCE_KLINES_1W_TTL = 30 * 1000;
-const BINANCE_TRADES_TTL = 20 * 1000;
+const BINANCE_TRADES_TTL = 30 * 1000;
 
 const COINGECKO_TTL = 3 * 60 * 60 * 1000;
 const FEAR_GREED_TTL = 60 * 60 * 1000;
@@ -329,7 +420,7 @@ async function fetchBinanceKlinesWeekly(limit = 260) {
   );
 }
 
-async function fetchBinanceTrades(limit = 700) {
+async function fetchBinanceTrades(limit = 1000) {
   const cacheKey = `binance_trades_${limit}`;
 
   return withCache(
@@ -805,7 +896,7 @@ async function getMarketAdvancedPayload() {
 async function getIntelligencePayload() {
   const [tickerResult, tradesResult, weeklyResult] = await Promise.allSettled([
     fetchBinanceTicker24h(),
-    fetchBinanceTrades(700),
+    fetchBinanceTrades(1000),
     fetchBinanceKlinesWeekly(260),
   ]);
 
@@ -928,9 +1019,49 @@ async function getIntelligencePayload() {
     premiumUpper = fairValueUpper * 1.14;
   }
 
+  const price = number(ticker?.lastPrice);
+  const change24h = number(ticker?.priceChangePercent);
+
+  const flowScoreRaw = ratioScore(buyPressure, sellPressure);
+  const whaleScoreRaw = ratioScore(whaleBuyValue, whaleSellValue);
+  const institutionalScoreRaw = ratioScore(institutionalBuyValue, institutionalSellValue);
+
+  const flowScore = clamp(flowScoreRaw, -100, 100);
+  const whaleScore = clamp(whaleScoreRaw, -100, 100);
+  const institutionalScore = clamp(institutionalScoreRaw, -100, 100);
+
+  const investorAttractiveness = calculateInvestorAttractiveness({
+    price,
+    deepValueUpper,
+    accumulationUpper,
+    fairValueUpper,
+    premiumUpper,
+    flowScore,
+    whaleScore,
+    institutionalScore,
+    previousStableAttractiveness: INTELLIGENCE_STATE.stableAttractiveness,
+  });
+
+  const investorBias = determineInvestorBias({
+    price,
+    deepValueUpper,
+    accumulationUpper,
+    fairValueUpper,
+    premiumUpper,
+    flowScore,
+    whaleScore,
+    institutionalScore,
+    previousBias: INTELLIGENCE_STATE.stableBias,
+  });
+
+  INTELLIGENCE_STATE.stableAttractiveness = investorAttractiveness;
+  INTELLIGENCE_STATE.stableBias = investorBias;
+  INTELLIGENCE_STATE.lastUpdatedAt = Date.now();
+
   return {
-    price: number(ticker?.lastPrice),
-    change24h: number(ticker?.priceChangePercent),
+    price,
+    change24h,
+
     buyPressure,
     sellPressure,
     largeBuyValue,
@@ -939,6 +1070,7 @@ async function getIntelligencePayload() {
     whaleSellValue,
     institutionalBuyValue,
     institutionalSellValue,
+
     yearlyHigh,
     yearlyLow,
     ma200w,
@@ -946,6 +1078,19 @@ async function getIntelligencePayload() {
     accumulationUpper,
     fairValueUpper,
     premiumUpper,
+
+    flowScore,
+    whaleScore,
+    institutionalScore,
+
+    investorAttractiveness: Number(investorAttractiveness.toFixed(1)),
+    investorBias,
+
+    stability: {
+      stableBias: INTELLIGENCE_STATE.stableBias,
+      stableAttractiveness: Number(INTELLIGENCE_STATE.stableAttractiveness.toFixed(1)),
+      lastUpdatedAt: new Date(INTELLIGENCE_STATE.lastUpdatedAt).toISOString(),
+    },
   };
 }
 
