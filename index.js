@@ -447,9 +447,12 @@ function calculateBtcCapitalFlow24hUsd(ticker) {
 
   return currentMarketCap - previousMarketCap;
 }
-
 function isExpoPushToken(token) {
-  return typeof token === "string" && /^ExponentPushToken\\[[A-Za-z0-9\\-_]+\\]$/.test(token);
+  return (
+    typeof token === "string" &&
+    (token.startsWith("ExponentPushToken[") || token.startsWith("ExpoPushToken[")) &&
+    token.endsWith("]")
+  );
 }
 
 function getNextPushVariant(type) {
