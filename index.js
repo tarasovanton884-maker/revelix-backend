@@ -449,7 +449,7 @@ function calculateBtcCapitalFlow24hUsd(ticker) {
 }
 
 function isExpoPushToken(token) {
-  return typeof token === "string" && /^ExponentPushToken\[[A-Za-z0-9\-_]+\]$/.test(token);
+  return typeof token === "string" && /^ExponentPushToken\\[[A-Za-z0-9\\-_]+\\]$/.test(token);
 }
 
 function getNextPushVariant(type) {
@@ -506,6 +506,19 @@ async function markTokenSent(rowId, type) {
   }
 }
 
+async function removeTokenByRowId(rowId) {
+  if (!supabase || !rowId) return;
+
+  const { error } = await supabase
+    .from("push_tokens")
+    .delete()
+    .eq("id", rowId);
+
+  if (error) {
+    console.error("Failed to remove token:", error);
+  }
+}
+
 async function sendPushNotification(type) {
   const rows = await getRegisteredTokens();
   if (!rows.length) {
@@ -546,22 +559,13 @@ async function sendPushNotification(type) {
       for (let i = 0; i < result.data.length; i += 1) {
         const item = result.data[i];
         const row = eligibleRows[i];
-
         if (!row) continue;
 
         if (item?.status === "ok") {
           await markTokenSent(row.id, type);
         } else if (item?.status === "error" && item?.details?.error === "DeviceNotRegistered") {
-          const { error } = await supabase
-            .from("push_tokens")
-            .delete()
-            .eq("id", row.id);
-
-          if (error) {
-            console.error("Failed to remove unregistered token:", error);
-          } else {
-            console.log("Removed unregistered token:", row.token);
-          }
+          await removeTokenByRowId(row.id);
+          console.log("Removed unregistered token:", row.token);
         }
       }
     }
@@ -671,11 +675,13 @@ async function processPushSignals() {
         improvingSignals.has(currentSignal) &&
         !improvingSignals.has(PUSH_RUNTIME_STATE.lastSignal)
       ) {
+        console.log(`Auto push trigger: signal_up (${PUSH_RUNTIME_STATE.lastSignal} -> ${currentSignal})`);
         await sendPushNotification("signal_up");
       } else if (
         worseningSignals.has(currentSignal) &&
         !worseningSignals.has(PUSH_RUNTIME_STATE.lastSignal)
       ) {
+        console.log(`Auto push trigger: signal_down (${PUSH_RUNTIME_STATE.lastSignal} -> ${currentSignal})`);
         await sendPushNotification("signal_down");
       }
     } else if (
@@ -683,11 +689,13 @@ async function processPushSignals() {
       currentRisk === "high" &&
       PUSH_RUNTIME_STATE.lastRisk !== "high"
     ) {
+      console.log(`Auto push trigger: risk (${PUSH_RUNTIME_STATE.lastRisk} -> ${currentRisk})`);
       await sendPushNotification("risk");
     } else if (
       PUSH_RUNTIME_STATE.lastAntiFomo === false &&
       currentAntiFomo === true
     ) {
+      console.log("Auto push trigger: fomo");
       await sendPushNotification("fomo");
     } else if (
       PUSH_RUNTIME_STATE.lastPhase &&
@@ -695,12 +703,16 @@ async function processPushSignals() {
       currentPhase !== PUSH_RUNTIME_STATE.lastPhase
     ) {
       if (currentPhase === "markup") {
+        console.log(`Auto push trigger: phase_markup (${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase})`);
         await sendPushNotification("phase_markup");
       } else if (currentPhase === "distribution") {
+        console.log(`Auto push trigger: phase_distribution (${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase})`);
         await sendPushNotification("phase_distribution");
       } else if (currentPhase === "markdown") {
+        console.log(`Auto push trigger: phase_markdown (${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase})`);
         await sendPushNotification("phase_markdown");
       } else if (currentPhase === "accumulation") {
+        console.log(`Auto push trigger: phase_accumulation (${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase})`);
         await sendPushNotification("phase_accumulation");
       }
     }
