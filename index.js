@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,12 +10,79 @@ app.use(express.json());
 
 const CACHE = new Map();
 
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+}
+
+const supabase =
+  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    : null;
+
+const PUSH_RUNTIME_STATE = {
+  lastVariantIndexByType: {},
+  lastSignal: null,
+  lastRisk: null,
+  lastPhase: null,
+  lastAntiFomo: false,
+};
+
 const INTELLIGENCE_STATE = {
   stableBias: "Neutral",
   stableAttractiveness: 5,
   pendingBias: null,
   pendingBiasCount: 0,
   lastUpdatedAt: 0,
+};
+
+const PUSH_TEXTS = {
+  signal_up: [
+    ["Signal improved", "Market conditions are becoming more constructive."],
+    ["Structure improving", "The broader setup is strengthening."],
+    ["Investor signal upgraded", "Conditions look better than before."],
+    ["Constructive shift", "The market setup is improving."],
+  ],
+  signal_down: [
+    ["Signal weakened", "Risk conditions increased. Check the app."],
+    ["Caution rising", "The setup looks less supportive now."],
+    ["Market signal softened", "Conditions are losing strength."],
+    ["Risk increased", "It may be time to stay more selective."],
+  ],
+  risk: [
+    ["Risk rising", "Market risk increased. Stay selective."],
+    ["Caution advised", "Conditions are becoming less supportive."],
+    ["Higher risk environment", "The setup looks less comfortable now."],
+    ["Risk alert", "Market structure is becoming less supportive."],
+  ],
+  fomo: [
+    ["Anti-FOMO active", "Market is moving too fast. Avoid chasing this move."],
+    ["Overheating detected", "Momentum looks too fast. Stay patient."],
+    ["Stay selective", "Fast upside does not always mean a clean entry."],
+    ["Don’t chase this move", "Price is running faster than structure supports."],
+  ],
+  phase_markup: [
+    ["Expansion phase", "Market may be entering a stronger expansion phase."],
+    ["Markup forming", "Momentum is building inside a more constructive phase."],
+    ["Phase shift", "Market structure is moving toward markup."],
+  ],
+  phase_distribution: [
+    ["Distribution warning", "Market may be entering a more distributive phase."],
+    ["Caution near highs", "Structure is becoming less supportive near the top side."],
+    ["Phase shift", "The market is showing distribution-like behavior."],
+  ],
+  phase_markdown: [
+    ["Markdown pressure", "Downside pressure is increasing. Stay selective."],
+    ["Weakening phase", "Market structure is shifting into a weaker phase."],
+    ["Phase shift", "The market is moving into markdown conditions."],
+  ],
+  phase_accumulation: [
+    ["Accumulation forming", "Market structure looks more stable."],
+    ["Early accumulation", "The market may be building an accumulation base."],
+    ["Phase shift", "Conditions are moving toward accumulation."],
+  ],
 };
 
 function setCache(key, value, ttlMs) {
@@ -271,7 +339,6 @@ function determineInvestorBiasCandidate({
     nextBias = "Distribution Risk";
   }
 
-  // Не даём прыгать напрямую между крайностями
   if (previousBias === "Accumulation" && nextBias === "Distribution Risk") {
     return "Fair Value";
   }
@@ -379,6 +446,272 @@ function calculateBtcCapitalFlow24hUsd(ticker) {
   const previousMarketCap = previousPrice * BTC_CIRCULATING_SUPPLY;
 
   return currentMarketCap - previousMarketCap;
+}
+
+function isExpoPushToken(token) {
+  return typeof token === "string" && /^ExponentPushToken\[[A-Za-z0-9\-_]+\]$/.test(token);
+}
+
+function getNextPushVariant(type) {
+  const variants = PUSH_TEXTS[type] || [];
+  if (!variants.length) {
+    return ["Revelix Alert", "Check the app for an important market update."];
+  }
+
+  const previousIndex = PUSH_RUNTIME_STATE.lastVariantIndexByType[type] ?? -1;
+  const nextIndex = variants.length === 1 ? 0 : (previousIndex + 1) % variants.length;
+  PUSH_RUNTIME_STATE.lastVariantIndexByType[type] = nextIndex;
+
+  return variants[nextIndex];
+}
+
+async function getRegisteredTokens() {
+  if (!supabase) return [];
+
+  const { data, error } = await supabase
+    .from("push_tokens")
+    .select("id, token, last_sent_at, last_type")
+    .not("token", "is", null);
+
+  if (error) {
+    console.error("Failed to load push tokens:", error);
+    return [];
+  }
+
+  return Array.isArray(data) ? data.filter((row) => isExpoPushToken(row.token)) : [];
+}
+
+function canSendTodayForRow(row) {
+  const today = new Date().toISOString().slice(0, 10);
+  const lastSentDay = row?.last_sent_at
+    ? new Date(row.last_sent_at).toISOString().slice(0, 10)
+    : null;
+
+  return lastSentDay !== today;
+}
+
+async function markTokenSent(rowId, type) {
+  if (!supabase || !rowId) return;
+
+  const { error } = await supabase
+    .from("push_tokens")
+    .update({
+      last_sent_at: new Date().toISOString(),
+      last_type: type,
+    })
+    .eq("id", rowId);
+
+  if (error) {
+    console.error("Failed to update push token send state:", error);
+  }
+}
+
+async function sendPushNotification(type) {
+  const rows = await getRegisteredTokens();
+  if (!rows.length) {
+    console.log("No registered push tokens");
+    return false;
+  }
+
+  const eligibleRows = rows.filter(canSendTodayForRow);
+  if (!eligibleRows.length) {
+    console.log("Push skipped: all tokens already received a push today");
+    return false;
+  }
+
+  const [title, body] = getNextPushVariant(type);
+
+  const messages = eligibleRows.map((row) => ({
+    to: row.token,
+    sound: "default",
+    title,
+    body,
+  }));
+
+  try {
+    const response = await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Accept-Encoding": "gzip, deflate",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(messages),
+    });
+
+    const result = await response.json();
+    console.log("Push send result:", JSON.stringify(result));
+
+    if (Array.isArray(result?.data)) {
+      for (let i = 0; i < result.data.length; i += 1) {
+        const item = result.data[i];
+        const row = eligibleRows[i];
+
+        if (!row) continue;
+
+        if (item?.status === "ok") {
+          await markTokenSent(row.id, type);
+        } else if (item?.status === "error" && item?.details?.error === "DeviceNotRegistered") {
+          const { error } = await supabase
+            .from("push_tokens")
+            .delete()
+            .eq("id", row.id);
+
+          if (error) {
+            console.error("Failed to remove unregistered token:", error);
+          } else {
+            console.log("Removed unregistered token:", row.token);
+          }
+        }
+      }
+    }
+
+    return true;
+  } catch (error) {
+    console.error("Push send failed:", error);
+    return false;
+  }
+}
+
+function deriveRiskBucket(intelligence) {
+  if (!intelligence) return "medium";
+
+  const price = number(intelligence.price);
+  const fair = number(intelligence.fairValueUpper);
+  const premium = number(intelligence.premiumUpper);
+  const bias = intelligence.investorBias;
+
+  if (bias === "Distribution Risk" || (price > premium && premium > 0)) {
+    return "high";
+  }
+
+  if (bias === "Accumulation" || bias === "Deep Value" || (price <= fair && fair > 0)) {
+    return "low";
+  }
+
+  return "medium";
+}
+
+function deriveAntiFomoState(marketData) {
+  if (!marketData) return false;
+
+  const fearGreed = number(marketData?.fearGreed?.value);
+  const change24h = number(marketData?.change24hPct);
+  const rangePos30 = number(marketData?.rangePos30);
+  const volRatio = number(marketData?.volRatio);
+
+  return (
+    rangePos30 > 80 ||
+    fearGreed >= 72 ||
+    (change24h > 3.2 && volRatio >= 1.2) ||
+    (fearGreed >= 68 && rangePos30 > 76)
+  );
+}
+
+function deriveMarketPhase(marketAdvanced) {
+  if (!marketAdvanced) return "neutral";
+
+  const drawdown = number(marketAdvanced.drawdown);
+  const perf30d = number(marketAdvanced.perf30d);
+  const perf90d = number(marketAdvanced.perf90d);
+  const price = number(marketAdvanced.price);
+  const accumulationUpper = number(marketAdvanced.accumulationUpper);
+  const premiumUpper = number(marketAdvanced.premiumUpper);
+
+  if (drawdown <= -45 && perf30d < 0) return "accumulation";
+  if (perf30d > 8 && perf90d > 15 && price < premiumUpper) return "markup";
+  if (price >= premiumUpper && perf30d > 0) return "distribution";
+  if (perf30d < -8 && perf90d < 0) return "markdown";
+  if (price <= accumulationUpper && perf30d <= 0) return "accumulation";
+
+  return "neutral";
+}
+
+async function processPushSignals() {
+  try {
+    const [intelligence, marketData, marketAdvanced] = await Promise.all([
+      withCache("intelligence", INTELLIGENCE_TTL, getIntelligencePayload, {
+        allowStaleOnError: true,
+      }),
+      withCache("market-data", MARKET_DATA_TTL, getMarketDataPayload, {
+        allowStaleOnError: true,
+      }),
+      withCache("market-advanced", MARKET_ADVANCED_TTL, getMarketAdvancedPayload, {
+        allowStaleOnError: true,
+      }),
+    ]);
+
+    const currentSignal = intelligence?.investorBias || null;
+    const currentRisk = deriveRiskBucket(intelligence);
+    const currentAntiFomo = deriveAntiFomoState(marketData);
+    const currentPhase = deriveMarketPhase(marketAdvanced);
+
+    if (
+      PUSH_RUNTIME_STATE.lastSignal === null &&
+      PUSH_RUNTIME_STATE.lastRisk === null &&
+      PUSH_RUNTIME_STATE.lastPhase === null
+    ) {
+      PUSH_RUNTIME_STATE.lastSignal = currentSignal;
+      PUSH_RUNTIME_STATE.lastRisk = currentRisk;
+      PUSH_RUNTIME_STATE.lastPhase = currentPhase;
+      PUSH_RUNTIME_STATE.lastAntiFomo = currentAntiFomo;
+      console.log("Push runtime state bootstrapped");
+      return;
+    }
+
+    if (
+      PUSH_RUNTIME_STATE.lastSignal &&
+      currentSignal &&
+      PUSH_RUNTIME_STATE.lastSignal !== currentSignal
+    ) {
+      const improvingSignals = new Set(["Accumulation", "Deep Value"]);
+      const worseningSignals = new Set(["Distribution Risk"]);
+
+      if (
+        improvingSignals.has(currentSignal) &&
+        !improvingSignals.has(PUSH_RUNTIME_STATE.lastSignal)
+      ) {
+        await sendPushNotification("signal_up");
+      } else if (
+        worseningSignals.has(currentSignal) &&
+        !worseningSignals.has(PUSH_RUNTIME_STATE.lastSignal)
+      ) {
+        await sendPushNotification("signal_down");
+      }
+    } else if (
+      PUSH_RUNTIME_STATE.lastRisk &&
+      currentRisk === "high" &&
+      PUSH_RUNTIME_STATE.lastRisk !== "high"
+    ) {
+      await sendPushNotification("risk");
+    } else if (
+      PUSH_RUNTIME_STATE.lastAntiFomo === false &&
+      currentAntiFomo === true
+    ) {
+      await sendPushNotification("fomo");
+    } else if (
+      PUSH_RUNTIME_STATE.lastPhase &&
+      currentPhase !== "neutral" &&
+      currentPhase !== PUSH_RUNTIME_STATE.lastPhase
+    ) {
+      if (currentPhase === "markup") {
+        await sendPushNotification("phase_markup");
+      } else if (currentPhase === "distribution") {
+        await sendPushNotification("phase_distribution");
+      } else if (currentPhase === "markdown") {
+        await sendPushNotification("phase_markdown");
+      } else if (currentPhase === "accumulation") {
+        await sendPushNotification("phase_accumulation");
+      }
+    }
+
+    PUSH_RUNTIME_STATE.lastSignal = currentSignal;
+    PUSH_RUNTIME_STATE.lastRisk = currentRisk;
+    PUSH_RUNTIME_STATE.lastPhase = currentPhase;
+    PUSH_RUNTIME_STATE.lastAntiFomo = currentAntiFomo;
+  } catch (error) {
+    console.error("Push processing failed:", error);
+  }
 }
 
 async function fetchBinanceTicker24h() {
@@ -1151,15 +1484,107 @@ app.get("/", (_req, res) => {
       "/api/order-flow",
       "/api/market-advanced",
       "/api/intelligence",
+      "/api/push/register",
+      "/api/push/unregister",
     ],
   });
 });
 
-app.get("/health", (_req, res) => {
+app.get("/health", async (_req, res) => {
+  let tokenCount = 0;
+
+  if (supabase) {
+    const { count } = await supabase
+      .from("push_tokens")
+      .select("*", { count: "exact", head: true });
+
+    tokenCount = count || 0;
+  }
+
   res.json({
     ok: true,
     time: new Date().toISOString(),
+    pushTokens: tokenCount,
   });
+});
+
+app.post("/api/push/register", async (req, res) => {
+  try {
+    const { token } = req.body || {};
+
+    if (!supabase) {
+      return res.status(500).json({ ok: false, error: "Supabase is not configured" });
+    }
+
+    if (!token || !isExpoPushToken(token)) {
+      return res.status(400).json({ ok: false, error: "Invalid push token" });
+    }
+
+    const { data: existing, error: selectError } = await supabase
+      .from("push_tokens")
+      .select("id")
+      .eq("token", token)
+      .maybeSingle();
+
+    if (selectError) {
+      console.error("Push register select error:", selectError);
+      return res.status(500).json({ ok: false, error: "Failed to check existing token" });
+    }
+
+    if (existing?.id) {
+      return res.json({ ok: true, existing: true });
+    }
+
+    const { error: insertError } = await supabase
+      .from("push_tokens")
+      .insert({
+        token,
+        created_at: new Date().toISOString(),
+        last_sent_at: null,
+        last_type: null,
+      });
+
+    if (insertError) {
+      console.error("Push register insert error:", insertError);
+      return res.status(500).json({ ok: false, error: "Failed to register push token" });
+    }
+
+    console.log("Push token registered:", token);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("Push register failed:", error);
+    res.status(500).json({ ok: false, error: "Unexpected register error" });
+  }
+});
+
+app.post("/api/push/unregister", async (req, res) => {
+  try {
+    const { token } = req.body || {};
+
+    if (!supabase) {
+      return res.status(500).json({ ok: false, error: "Supabase is not configured" });
+    }
+
+    if (!token) {
+      return res.status(400).json({ ok: false, error: "Token is required" });
+    }
+
+    const { error } = await supabase
+      .from("push_tokens")
+      .delete()
+      .eq("token", token);
+
+    if (error) {
+      console.error("Push unregister error:", error);
+      return res.status(500).json({ ok: false, error: "Failed to unregister token" });
+    }
+
+    console.log("Push token removed:", token);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("Push unregister failed:", error);
+    res.status(500).json({ ok: false, error: "Unexpected unregister error" });
+  }
 });
 
 app.get("/api/dashboard", async (_req, res) => {
@@ -1224,4 +1649,12 @@ app.get("/api/intelligence", async (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Revelix backend is running on port ${PORT}`);
+
+  setTimeout(() => {
+    processPushSignals();
+  }, 30 * 1000);
+
+  setInterval(() => {
+    processPushSignals();
+  }, 15 * 60 * 1000);
 });
