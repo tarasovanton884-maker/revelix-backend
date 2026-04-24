@@ -9,6 +9,12 @@ app.use(cors());
 app.use(express.json());
 
 const CACHE = new Map();
+let LAST_GOOD_TICKER = null;
+
+function isValidTicker(ticker) {
+  const price = Number(ticker?.lastPrice);
+  return Number.isFinite(price) && price > 0;
+}
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -128,6 +134,29 @@ async function withCache(key, ttlMs, fn, options = {}) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchJsonWithRetry(url, timeoutMs = 10000, attempts = 3) {
+  let lastError = null;
+
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      return await fetchJson(url, timeoutMs);
+    } catch (error) {
+      lastError = error;
+      console.warn(`Fetch attempt ${i}/${attempts} failed:`, error.message);
+
+      if (i < attempts) {
+        await sleep(500 * i);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 async function fetchJson(url, timeoutMs = 10000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -158,7 +187,7 @@ async function fetchJson(url, timeoutMs = 10000) {
 
 async function fetchJsonWithStaleFallback(url, cacheKey, timeoutMs = 10000) {
   try {
-    return await fetchJson(url, timeoutMs);
+    return await fetchJsonWithRetry(url, timeoutMs, 3);
   } catch (error) {
     const stale = getCache(cacheKey, true);
 
@@ -739,19 +768,27 @@ async function fetchBinanceTicker24h() {
         "binance_ticker_24h"
       );
 
-      if (!data) {
-        return {
-          lastPrice: 0,
-          priceChangePercent: 0,
-          highPrice: 0,
-          lowPrice: 0,
-          quoteVolume: 0,
-          bidPrice: 0,
-          askPrice: 0,
-        };
-      }
+      if (!isValidTicker(data)) {
+  console.warn("Invalid Binance ticker, using fallback");
 
-      return data;
+  if (LAST_GOOD_TICKER) {
+    return LAST_GOOD_TICKER;
+  }
+
+  return {
+    lastPrice: 0,
+    priceChangePercent: 0,
+    highPrice: 0,
+    lowPrice: 0,
+    quoteVolume: 0,
+    bidPrice: 0,
+    askPrice: 0,
+  };
+}
+
+LAST_GOOD_TICKER = data;
+return data;
+
     },
     { allowStaleOnError: true }
   );
@@ -1659,6 +1696,53 @@ app.get("/api/intelligence", async (_req, res) => {
   } catch (error) {
     console.error("Intelligence endpoint failed:", error);
     res.status(500).json({ ok: false, error: "Failed to load intelligence data" });
+  }
+});
+
+app.get("/api/debug/binance", async (_req, res) => {
+  const startedAt = Date.now();
+
+  try {
+    const response = await fetch(
+      "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT",
+      { headers: { Accept: "application/json" } }
+    );
+
+    const text = await response.text();
+    let parsed = null;
+
+    try {
+      parsed = JSON.parse(text);
+    } catch (_error) {
+      parsed = null;
+    }
+
+    res.json({
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      durationMs: Date.now() - startedAt,
+
+      validTicker: isValidTicker(parsed),
+      liveLastPrice: parsed?.lastPrice ?? null,
+
+      staleCacheLastPrice: getCache("binance_ticker_24h", true)?.lastPrice ?? null,
+      lastGoodLastPrice: LAST_GOOD_TICKER?.lastPrice ?? null,
+
+      preview: text.slice(0, 300),
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+      durationMs: Date.now() - startedAt,
+
+      staleCacheLastPrice: getCache("binance_ticker_24h", true)?.lastPrice ?? null,
+      lastGoodLastPrice: LAST_GOOD_TICKER?.lastPrice ?? null,
+
+      checkedAt: new Date().toISOString(),
+    });
   }
 });
 
