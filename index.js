@@ -250,7 +250,7 @@ function percentChange(current, previous) {
 }
 
 function calculateAtrPercent(klines, period) {
-  if (!Array.isArray(klines) || klines.length < period + 1) return 0;
+  if (!Array.isArray(klines) || klines.length < period + 1) return null;
 
   const trueRanges = [];
   for (let i = 1; i < klines.length; i += 1) {
@@ -271,7 +271,7 @@ function calculateAtrPercent(klines, period) {
   const atr = average(relevant);
   const currentClose = number(klines[klines.length - 1][4]);
 
-  if (!currentClose) return 0;
+  if (!currentClose) return null;
   return (atr / currentClose) * 100;
 }
 
@@ -1560,9 +1560,9 @@ const dataHealth = getDataHealth([
   const closes52 = closes.slice(-52);
   const sortedCloses52 = [...closes52].sort((a, b) => a - b);
 
-  const yearlyHigh = highs.length ? Math.max(...highs.slice(-52)) : 0;
-  const yearlyLow = lows.length ? Math.min(...lows.slice(-52)) : 0;
-
+  const yearlyHigh = maxOf(highs.slice(-52));
+  const yearlyLow = minOf(lows.slice(-52));
+  
   const last200Weeks = closes.slice(-200);
   const ma200w = average(last200Weeks);
 
