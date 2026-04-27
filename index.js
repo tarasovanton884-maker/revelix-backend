@@ -102,12 +102,39 @@ function getCache(key, allowStale = false) {
   const entry = CACHE.get(key);
   if (!entry) return null;
 
-  if (!allowStale && Date.now() > entry.expiresAt) {
-    CACHE.delete(key);
+  const isExpired = Date.now() > entry.expiresAt;
+
+  if (isExpired && !allowStale) {
     return null;
   }
 
   return entry.value;
+}
+
+function getDataHealth(items = []) {
+  const total = items.length;
+  const live = items.filter((item) => item.status === "live").length;
+  const stale = items.filter((item) => item.status === "stale").length;
+  const missing = items.filter((item) => item.status === "missing").length;
+
+  let status = "live";
+
+  if (missing === total) {
+    status = "broken";
+  } else if (missing > 0) {
+    status = "partial";
+  } else if (stale > 0) {
+    status = "stale";
+  }
+
+  return {
+    status,
+    live,
+    stale,
+    missing,
+    total,
+    checkedAt: new Date().toISOString(),
+  };
 }
 
 async function withCache(key, ttlMs, fn, options = {}) {
@@ -217,7 +244,7 @@ function clamp(value, min, max) {
 
 function percentChange(current, previous) {
   if (!Number.isFinite(current) || !Number.isFinite(previous) || previous <= 0) {
-    return 0;
+    return null;
   }
   return ((current - previous) / previous) * 100;
 }
@@ -249,18 +276,37 @@ function calculateAtrPercent(klines, period) {
 }
 
 function getHigh(klines) {
-  if (!Array.isArray(klines) || !klines.length) return 0;
-  return Math.max(...klines.map((kline) => number(kline[2], 0)));
+  if (!Array.isArray(klines) || !klines.length) return null;
+
+  const values = klines
+    .map((kline) => number(kline[2], null))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  if (!values.length) return null;
+
+  return Math.max(...values);
 }
 
 function getLow(klines) {
-  if (!Array.isArray(klines) || !klines.length) return 0;
-  return Math.min(...klines.map((kline) => number(kline[3], Infinity)));
+  if (!Array.isArray(klines) || !klines.length) return null;
+
+  const values = klines
+    .map((kline) => number(kline[3], null))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  if (!values.length) return null;
+
+  return Math.min(...values);
 }
 
 function getClose(klines, fromEnd = 1) {
-  if (!Array.isArray(klines) || klines.length < fromEnd) return 0;
-  return number(klines[klines.length - fromEnd][4]);
+  if (!Array.isArray(klines) || klines.length < fromEnd) return null;
+
+  const value = number(klines[klines.length - fromEnd]?.[4], null);
+
+  if (!Number.isFinite(value) || value <= 0) return null;
+
+  return value;
 }
 
 function getSlice(klines, days) {
@@ -775,15 +821,7 @@ async function fetchBinanceTicker24h() {
     return LAST_GOOD_TICKER;
   }
 
-  return {
-    lastPrice: 0,
-    priceChangePercent: 0,
-    highPrice: 0,
-    lowPrice: 0,
-    quoteVolume: 0,
-    bidPrice: 0,
-    askPrice: 0,
-  };
+  return null;
 }
 
 LAST_GOOD_TICKER = data;
@@ -806,7 +844,18 @@ async function fetchBinanceKlinesDaily(limit = 120) {
         cacheKey
       );
 
-      return Array.isArray(data) ? data : [];
+      if (!Array.isArray(data) || data.length === 0) {
+        console.warn("Invalid/empty Binance daily klines, using stale fallback:", cacheKey);
+
+        const stale = getCache(cacheKey, true);
+        if (Array.isArray(stale) && stale.length > 0) {
+          return stale;
+        }
+
+        return null;
+      }
+
+      return data;
     },
     { allowStaleOnError: true }
   );
@@ -824,7 +873,18 @@ async function fetchBinanceKlines4h(limit = 180) {
         cacheKey
       );
 
-      return Array.isArray(data) ? data : [];
+      if (!Array.isArray(data) || data.length === 0) {
+        console.warn("Invalid/empty Binance 4h klines, using stale fallback:", cacheKey);
+
+        const stale = getCache(cacheKey, true);
+        if (Array.isArray(stale) && stale.length > 0) {
+          return stale;
+        }
+
+        return null;
+      }
+
+      return data;
     },
     { allowStaleOnError: true }
   );
@@ -842,7 +902,18 @@ async function fetchBinanceKlinesWeekly(limit = 260) {
         cacheKey
       );
 
-      return Array.isArray(data) ? data : [];
+      if (!Array.isArray(data) || data.length === 0) {
+        console.warn("Invalid/empty Binance weekly klines, using stale fallback:", cacheKey);
+
+        const stale = getCache(cacheKey, true);
+        if (Array.isArray(stale) && stale.length > 0) {
+          return stale;
+        }
+
+        return null;
+      }
+
+      return data;
     },
     { allowStaleOnError: true }
   );
@@ -860,7 +931,18 @@ async function fetchBinanceTrades(limit = 1000) {
         cacheKey
       );
 
-      return Array.isArray(data) ? data : [];
+      if (!Array.isArray(data) || data.length === 0) {
+        console.warn("Invalid/empty Binance trades, using stale fallback:", cacheKey);
+
+        const stale = getCache(cacheKey, true);
+        if (Array.isArray(stale) && stale.length > 0) {
+          return stale;
+        }
+
+        return null;
+      }
+
+      return data;
     },
     { allowStaleOnError: true }
   );
@@ -974,9 +1056,28 @@ async function getMarketDataPayload() {
   ]);
 
   const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
-  const klines = klinesResult.status === "fulfilled" ? klinesResult.value : [];
-  const globalData = globalDataResult.status === "fulfilled" ? globalDataResult.value : null;
-  const fearGreed = fearGreedResult.status === "fulfilled" ? fearGreedResult.value : null;
+const klines = klinesResult.status === "fulfilled" ? klinesResult.value : null;
+const globalData = globalDataResult.status === "fulfilled" ? globalDataResult.value : null;
+const fearGreed = fearGreedResult.status === "fulfilled" ? fearGreedResult.value : null;
+
+const dataHealth = getDataHealth([
+  {
+    name: "ticker",
+    status: ticker ? "live" : "missing",
+  },
+  {
+    name: "dailyKlines",
+    status: Array.isArray(klines) && klines.length >= 90 ? "live" : "missing",
+  },
+  {
+    name: "globalData",
+    status: globalData ? "live" : "missing",
+  },
+  {
+    name: "fearGreed",
+    status: fearGreed ? "live" : "missing",
+  },
+]);
 
   const price = number(ticker?.lastPrice);
   const fear = fearGreed?.data?.[0] || {};
@@ -1036,6 +1137,7 @@ async function getMarketDataPayload() {
     bidPrice: number(ticker?.bidPrice),
     askPrice: number(ticker?.askPrice),
     updatedAt: new Date().toISOString(),
+    dataHealth,
 
     fearGreed: {
       value: number(fear?.value),
