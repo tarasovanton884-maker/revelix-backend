@@ -1008,10 +1008,25 @@ async function getDashboardPayload() {
     fetchCoinGeckoGlobal(),
     fetchFearGreed(),
   ]);
-
+  
   const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
-  const globalData = globalDataResult.status === "fulfilled" ? globalDataResult.value : null;
-  const fearGreed = fearGreedResult.status === "fulfilled" ? fearGreedResult.value : null;
+const globalData = globalDataResult.status === "fulfilled" ? globalDataResult.value : null;
+const fearGreed = fearGreedResult.status === "fulfilled" ? fearGreedResult.value : null;
+
+  const dataHealth = getDataHealth([
+  {
+    name: "ticker",
+    status: ticker ? "live" : "missing",
+  },
+  {
+    name: "globalData",
+    status: globalData ? "live" : "missing",
+  },
+  {
+    name: "fearGreed",
+    status: fearGreed ? "live" : "missing",
+  },
+]);
 
   const fear = fearGreed?.data?.[0] || {};
   const dominance = number(globalData?.data?.market_cap_percentage?.btc);
@@ -1032,6 +1047,7 @@ async function getDashboardPayload() {
     bidPrice: number(ticker?.bidPrice),
     askPrice: number(ticker?.askPrice),
     updatedAt: new Date().toISOString(),
+    dataHealth,
     dominanceBtcPct: dominance,
     marketCapChange24h,
     btcFlow24hUsd,
@@ -1188,9 +1204,24 @@ async function getOrderFlowPayload() {
     fetchBinanceKlines4h(180),
   ]);
 
-  const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
-  const dailyRaw = dailyResult.status === "fulfilled" ? dailyResult.value : [];
-  const h4Raw = h4Result.status === "fulfilled" ? h4Result.value : [];
+ const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
+const dailyRaw = dailyResult.status === "fulfilled" ? dailyResult.value : null;
+const h4Raw = h4Result.status === "fulfilled" ? h4Result.value : null;
+
+const dataHealth = getDataHealth([
+  {
+    name: "ticker",
+    status: ticker ? "live" : "missing",
+  },
+  {
+    name: "dailyKlines",
+    status: Array.isArray(dailyRaw) && dailyRaw.length >= 90 ? "live" : "missing",
+  },
+  {
+    name: "h4Klines",
+    status: Array.isArray(h4Raw) && h4Raw.length >= 120 ? "live" : "missing",
+  },
+]);
 
   const daily = Array.isArray(dailyRaw) ? dailyRaw : [];
   const h4 = Array.isArray(h4Raw) ? h4Raw : [];
@@ -1260,6 +1291,7 @@ async function getOrderFlowPayload() {
   return {
     price,
     change24h,
+    dataHealth,
     high7d,
     low7d,
     high14d,
@@ -1288,9 +1320,24 @@ async function getMarketAdvancedPayload() {
     fetchBinanceKlinesDaily(400),
   ]);
 
-  const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
-  const weeklyRaw = weeklyResult.status === "fulfilled" ? weeklyResult.value : [];
-  const dailyRaw = dailyResult.status === "fulfilled" ? dailyResult.value : [];
+const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
+const weeklyRaw = weeklyResult.status === "fulfilled" ? weeklyResult.value : null;
+const dailyRaw = dailyResult.status === "fulfilled" ? dailyResult.value : null;
+
+const dataHealth = getDataHealth([
+  {
+    name: "ticker",
+    status: ticker ? "live" : "missing",
+  },
+  {
+    name: "weeklyKlines",
+    status: Array.isArray(weeklyRaw) && weeklyRaw.length >= 200 ? "live" : "missing",
+  },
+  {
+    name: "dailyKlines",
+    status: Array.isArray(dailyRaw) && dailyRaw.length >= 365 ? "live" : "missing",
+  },
+]);
 
   const weekly = Array.isArray(weeklyRaw) ? weeklyRaw : [];
   const daily = Array.isArray(dailyRaw) ? dailyRaw : [];
@@ -1388,6 +1435,7 @@ async function getMarketAdvancedPayload() {
   return {
     price,
     change24h,
+    dataHealth,
     yearlyHigh,
     yearlyLow,
     ath,
@@ -1430,9 +1478,24 @@ async function getIntelligencePayload() {
     fetchBinanceKlinesWeekly(260),
   ]);
 
-  const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
-  const tradesRaw = tradesResult.status === "fulfilled" ? tradesResult.value : [];
-  const weeklyRaw = weeklyResult.status === "fulfilled" ? weeklyResult.value : [];
+const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
+const tradesRaw = tradesResult.status === "fulfilled" ? tradesResult.value : null;
+const weeklyRaw = weeklyResult.status === "fulfilled" ? weeklyResult.value : null;
+
+const dataHealth = getDataHealth([
+  {
+    name: "ticker",
+    status: ticker ? "live" : "missing",
+  },
+  {
+    name: "trades",
+    status: Array.isArray(tradesRaw) && tradesRaw.length >= 100 ? "live" : "missing",
+  },
+  {
+    name: "weeklyKlines",
+    status: Array.isArray(weeklyRaw) && weeklyRaw.length >= 200 ? "live" : "missing",
+  },
+]);
 
   const trades = Array.isArray(tradesRaw) ? tradesRaw : [];
   const weekly = Array.isArray(weeklyRaw) ? weeklyRaw : [];
@@ -1595,6 +1658,7 @@ async function getIntelligencePayload() {
   return {
     price,
     change24h,
+    dataHealth,
     buyPressure,
     sellPressure,
     largeBuyValue,
