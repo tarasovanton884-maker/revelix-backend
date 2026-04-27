@@ -333,24 +333,34 @@ function calculateVolumeRatio(klines) {
 }
 
 function minOf(values) {
-  const valid = values.filter((v) => Number.isFinite(v) && v > 0);
-  if (!valid.length) return 0;
+  const valid = Array.isArray(values)
+    ? values.filter((v) => Number.isFinite(v) && v > 0)
+    : [];
+
+  if (!valid.length) return null;
+
   return Math.min(...valid);
 }
 
 function maxOf(values) {
-  const valid = values.filter((v) => Number.isFinite(v) && v > 0);
-  if (!valid.length) return 0;
+  const valid = Array.isArray(values)
+    ? values.filter((v) => Number.isFinite(v) && v > 0)
+    : [];
+
+  if (!valid.length) return null;
+
   return Math.max(...valid);
 }
 
 function getCloseAtOffset(closes, offsetFromEnd) {
-  if (!Array.isArray(closes) || closes.length <= offsetFromEnd) return 0;
-  return closes[closes.length - 1 - offsetFromEnd];
+  if (!Array.isArray(closes) || closes.length <= offsetFromEnd) return null;
+
+  const value = closes[closes.length - 1 - offsetFromEnd];
+  return Number.isFinite(value) ? value : null;
 }
 
 function getPercentile(sortedValues, percentile) {
-  if (!Array.isArray(sortedValues) || !sortedValues.length) return 0;
+  if (!Array.isArray(sortedValues) || !sortedValues.length) return null;
 
   const index = (sortedValues.length - 1) * percentile;
   const lower = Math.floor(index);
@@ -959,16 +969,9 @@ async function fetchCoinGeckoGlobal() {
       );
 
       if (!data) {
-        return {
-          data: {
-            market_cap_percentage: { btc: 0 },
-            total_market_cap: { usd: 0 },
-            total_volume: { usd: 0 },
-            market_cap_change_percentage_24h_usd: 0,
-          },
-        };
-      }
-
+  console.warn("CoinGecko unavailable, returning null");
+  return null;
+}
       return data;
     },
     { allowStaleOnError: true }
@@ -985,18 +988,12 @@ async function fetchFearGreed() {
         "fear_greed"
       );
 
-      if (!data) {
-        return {
-          data: [
-            {
-              value: 0,
-              value_classification: "Unknown",
-            },
-          ],
-        };
-      }
+if (!data) {
+  console.warn("Fear & Greed unavailable, returning null");
+  return null;
+}
 
-      return data;
+     return data;
     },
     { allowStaleOnError: true }
   );
