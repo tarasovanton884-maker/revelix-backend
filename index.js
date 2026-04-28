@@ -1094,19 +1094,32 @@ function buildDashboardFinalSignal(metrics) {
   const flow = safeNumber(metrics.btcFlow24hUsd, 0);
 
   const antiFomoActive =
-    rangePos30 > 82 ||
-    rangePos90 > 86 ||
-    fearGreedValue >= 72 ||
+    rangePos30 > 78 ||
+    rangePos90 > 84 ||
+    fearGreedValue >= 70 ||
     (change24h > 3.0 && structure.volatility === "High") ||
     (change24h > 2.0 && structure.liquidity === "Thin") ||
-    (fearGreedValue >= 68 && rangePos30 > 74);
+    (perf7d > 6 && rangePos30 > 70) ||
+    (fearGreedValue >= 64 && rangePos30 > 70);
 
-  const marketState =
-    rangePos90 <= 32 && fearGreedValue <= 45
-      ? "Undervalued"
-      : rangePos30 >= 76 || rangePos90 >= 84 || fearGreedValue >= 72
-        ? "Overheated"
-        : "Fair Value";
+  const overheatedByRange =
+    rangePos30 >= 72 ||
+    rangePos90 >= 82 ||
+    (rangePos30 >= 68 && perf7d >= 4) ||
+    (rangePos90 >= 76 && perf30d >= 6) ||
+    (fearGreedValue >= 66 && rangePos30 >= 66) ||
+    (change24h >= 2.4 && rangePos30 >= 64) ||
+    (volRatio <= 0.92 && change24h >= 1.8 && rangePos30 >= 62);
+
+  const undervaluedByRange =
+    (rangePos90 <= 34 && fearGreedValue <= 48) ||
+    (rangePos30 <= 28 && perf30d <= -4 && fearGreedValue <= 55);
+
+  const marketState = undervaluedByRange
+    ? "Undervalued"
+    : overheatedByRange
+      ? "Overheated"
+      : "Fair Value";
 
   const cyclePosition =
     rangePos90 <= 30 && perf90d <= 5
@@ -1272,9 +1285,35 @@ function buildDashboardFinalSignal(metrics) {
     };
   }
 
+  const signalQuality =
+    signal === "Buy Zone"
+      ? "High Edge"
+      : signal === "Accumulation Watch"
+        ? "Developing Edge"
+        : signal === "Constructive"
+          ? "Constructive Edge"
+          : signal === "Caution"
+            ? "Mixed Edge"
+            : "Defensive";
+
+  const signalState =
+    marketState === "Overheated"
+      ? "Overheated"
+      : antiFomoActive
+        ? "Stretched"
+        : structure.trend === "Recovery"
+          ? "Building"
+          : structure.trend === "Bullish"
+            ? "Confirmed"
+            : structure.trend === "Bearish" || structure.trend === "Weakening"
+              ? "Defensive"
+              : "Range";
+
   return {
     signal,
     confidence,
+    signalQuality,
+    signalState,
     conviction,
     entryRisk,
     summary,
@@ -1349,10 +1388,32 @@ function buildDashboardMarketClarity(signal) {
   confidence += signal.confidence >= 72 ? 8 : signal.confidence >= 58 ? 4 : 0;
   confidence = clamp(Math.round(confidence), 24, 92);
 
+  const edgeQuality =
+    level === "High"
+      ? "Strong Edge"
+      : level === "Medium"
+        ? "Developing Edge"
+        : trapRisk === "High"
+          ? "Risk Edge"
+          : "Low Edge";
+
+  const clarityState =
+    signal.marketState === "Overheated"
+      ? "Overheated"
+      : trapRisk === "High"
+        ? "Trap Risk"
+        : investorMode === "Constructive" && level !== "Low"
+          ? "Constructive"
+          : investorMode === "Risk-Off"
+            ? "Defensive"
+            : "Mixed";
+
   return {
     level,
     status,
     confidence,
+    edgeQuality,
+    clarityState,
     stabilityLabel,
     trapRisk,
     investorMode,
