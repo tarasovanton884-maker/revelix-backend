@@ -2273,6 +2273,182 @@ const dataHealth = getDataHealth([
   };
 }
 
+
+// Order Flow screen logic moved from frontend. Keep this backend-driven.
+function ofFormatPercent(value) {
+  if (!Number.isFinite(value)) return "—";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function ofBadgeColor(label) {
+  const green = ["Upside Pull", "Demand-Dominant", "Constructive", "Supportive", "Accum Zone", "Markup", "Improving", "Contracting", "Stable", "Constructive Flow", "Short squeeze risk", "Recovery-aligned", "Market-supportive", "Low"];
+  const red = ["Downside Pull", "Supply-Dominant", "Risk-Off", "Fragile", "Markdown", "Distribution", "Weakening", "Expanding", "High", "Fragile Flow", "Crowded upside", "Wait for cleaner reset", "Sell-off aligned", "Risk-sensitive"];
+  const amber = ["Balanced Pull", "Balanced", "Mixed", "Medium", "Building", "Open Space Above", "Open Space Below", "Compressed Above", "Compressed Below", "Neutral", "Upper Range", "Lower Range", "Mid Range", "Mixed Flow", "Stay selective", "Needs broader confirmation", "Developing", "Mature", "Early"];
+  if (green.includes(label)) return "#00d09c";
+  if (red.includes(label)) return "#ff5c5c";
+  if (amber.includes(label)) return "#f5b942";
+  return "#f5b942";
+}
+
+function getDensityLabel(distancePct, atr14Pct) {
+  if (distancePct <= atr14Pct * 0.9) return "High";
+  if (distancePct <= atr14Pct * 1.8) return "Medium";
+  return "Low";
+}
+
+function dedupeLevels(levels) {
+  const sorted = [...levels].filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+  const out = [];
+  for (const level of sorted) {
+    if (!out.length) { out.push(level); continue; }
+    const last = out[out.length - 1];
+    const diffPct = last > 0 ? Math.abs((level - last) / last) * 100 : 0;
+    if (diffPct > 0.35) out.push(level);
+  }
+  return out;
+}
+
+function buildLiquidityLadder(price, high7d, low7d, high14d, low14d, high30d, low30d, high90d, low90d, nearTermHigh, nearTermLow, atr14Pct) {
+  if (!Number.isFinite(price) || price <= 0) {
+    return { above: [], below: [], structureLabel: "Balanced", structureNote: "Liquidity data is incomplete, so nearby route context is limited right now.", bias: "Mixed", reactionRisk: "Medium" };
+  }
+  const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
+  const rawAbove = dedupeLevels([nearTermHigh, high7d, high14d, high30d, high90d].filter((level) => level > price)).sort((a, b) => a - b);
+  const rawBelow = dedupeLevels([nearTermLow, low7d, low14d, low30d, low90d].filter((level) => level < price)).sort((a, b) => b - a);
+  const minimumStepPct = Math.max(safeAtr * 1.35, 3.5);
+  while (rawAbove.length < 3) { const last = rawAbove[rawAbove.length - 1] ?? price; rawAbove.push(last * (1 + minimumStepPct / 100)); }
+  while (rawBelow.length < 3) { const last = rawBelow[rawBelow.length - 1] ?? price; rawBelow.push(Math.max(last * (1 - minimumStepPct / 100), price * 0.5)); }
+  const above = rawAbove.slice(0, 3).map((level, index) => {
+    const distancePct = ((level - price) / price) * 100;
+    return { label: index === 0 ? "Nearest" : index === 1 ? "Next Cluster" : "Major Cluster", level, distancePct, density: getDensityLabel(distancePct, safeAtr), color: "#ff5c5c" };
+  });
+  const below = rawBelow.slice(0, 3).map((level, index) => {
+    const distancePct = ((price - level) / price) * 100;
+    return { label: index === 0 ? "Nearest" : index === 1 ? "Next Cluster" : "Major Cluster", level, distancePct, density: getDensityLabel(distancePct, safeAtr), color: "#00d09c" };
+  });
+  const nearestAbove = above[0]?.distancePct ?? 999;
+  const nearestBelow = below[0]?.distancePct ?? 999;
+  let structureLabel = "Balanced";
+  let structureNote = "Liquidity looks relatively balanced on both sides, so the market may stay rotational until one side becomes more actionable.";
+  let bias = "Mixed";
+  let reactionRisk = "Medium";
+  if (nearestAbove < nearestBelow * 0.72) { structureLabel = "Open Space Above"; structureNote = "Upside liquidity is more actionable than downside liquidity. This often creates a cleaner path for a liquidity push upward before the market meets stronger reaction zones."; bias = "Supportive"; reactionRisk = "Medium"; }
+  else if (nearestBelow < nearestAbove * 0.72) { structureLabel = "Open Space Below"; structureNote = "Downside liquidity is more actionable than upside liquidity. This often creates a cleaner path for a lower sweep before stronger support or absorption becomes relevant."; bias = "Risk-Off"; reactionRisk = "High"; }
+  else if (above[0]?.density === "High" && below[0]?.density !== "High") { structureLabel = "Compressed Above"; structureNote = "The nearest actionable liquidity is concentrated above current price. That can pull the market upward first, but it can also create faster rejection risk once reached."; bias = "Constructive"; reactionRisk = "High"; }
+  else if (below[0]?.density === "High" && above[0]?.density !== "High") { structureLabel = "Compressed Below"; structureNote = "The nearest actionable liquidity is concentrated below current price. That can pull the market downward first, but it can also set up a local reaction after the sweep."; bias = "Fragile"; reactionRisk = "High"; }
+  return { above, below, structureLabel, structureNote, bias, reactionRisk };
+}
+
+function getPressureResult(upsideDistance, downsideDistance, perf7d, perf30d, rangePos30) {
+  let upsideScore = 0;
+  let downsideScore = 0;
+  upsideScore += upsideDistance < downsideDistance ? 2.2 : 0.8;
+  upsideScore += perf7d > 0 ? 1.2 : 0;
+  upsideScore += perf30d > 0 ? 1.4 : 0;
+  upsideScore += rangePos30 > 52 ? 1 : 0;
+  downsideScore += downsideDistance < upsideDistance ? 2.2 : 0.8;
+  downsideScore += perf7d < 0 ? 1.2 : 0;
+  downsideScore += perf30d < 0 ? 1.4 : 0;
+  downsideScore += rangePos30 < 48 ? 1 : 0;
+  const diff = upsideScore - downsideScore;
+  if (diff > 1.4) return { label: "Upside Pull", bias: "Demand-Dominant", score: diff, note: "The nearest and more actionable liquidity looks skewed upward, which suggests price may still be drawn toward overhead liquidity first." };
+  if (diff < -1.4) return { label: "Downside Pull", bias: "Supply-Dominant", score: Math.abs(diff), note: "The nearest and more actionable liquidity looks skewed downward, which suggests the market may still be vulnerable to lower-side sweeps first." };
+  return { label: "Balanced Pull", bias: "Mixed", score: Math.abs(diff), note: "Liquidity attraction looks mixed rather than strongly one-sided, so the market may stay rotational until stronger pressure appears." };
+}
+
+function getTrapEngine(perf7d, perf30d, rangePos30, shortVolatilityPct) {
+  let longTrap = "Low";
+  let shortTrap = "Low";
+  let crowdedSide = "Balanced";
+  let note = "Trap pressure currently looks balanced, which means neither side appears severely overcrowded.";
+  if (rangePos30 > 72 && perf30d > 6 && perf7d < 0) { longTrap = "High"; shortTrap = "Low"; crowdedSide = "Buyers"; note = "The market is elevated in range position, but shorter momentum is already fading. That often increases the risk of a long-side trap."; }
+  else if (rangePos30 > 62 && perf30d > 4) { longTrap = "Medium"; crowdedSide = "Buyers"; }
+  if (rangePos30 < 32 && perf30d < -6 && perf7d > 0) { shortTrap = "High"; if (longTrap !== "High") longTrap = "Low"; crowdedSide = "Sellers"; note = "The market is depressed in range position, but shorter momentum is trying to improve. That often increases the risk of a short-side trap."; }
+  else if (rangePos30 < 40 && perf30d < -4) { shortTrap = "Medium"; if (crowdedSide === "Balanced") crowdedSide = "Sellers"; }
+  if (shortVolatilityPct > 4.5 && longTrap === "Low" && shortTrap === "Low") { crowdedSide = "Balanced"; note = "Volatility is elevated, so even without a clear crowding signal, fast squeeze risk remains relevant on both sides."; }
+  return { longTrap, shortTrap, crowdedSide, note };
+}
+
+function getWyckoffEngine(perf7d, perf30d, perf90d, rangePos30, rangePos90, atr14Pct, atr30Pct) {
+  let accumulationScore = 0, markupScore = 0, distributionScore = 0, markdownScore = 0;
+  accumulationScore += rangePos30 < 45 ? 1.6 : 0;
+  accumulationScore += rangePos90 < 50 ? 1.0 : 0;
+  accumulationScore += perf30d > -8 && perf30d < 4 ? 1.8 : 0;
+  accumulationScore += perf90d < 5 ? 1.0 : 0;
+  accumulationScore += atr14Pct < atr30Pct ? 1.2 : 0;
+  markupScore += perf30d > 5 ? 2.2 : 0;
+  markupScore += perf90d > 8 ? 1.8 : 0;
+  markupScore += rangePos30 > 58 ? 1.6 : 0;
+  markupScore += rangePos90 > 52 ? 1.0 : 0;
+  markupScore += perf7d > 0 ? 0.8 : 0;
+  distributionScore += rangePos30 > 68 ? 1.8 : 0;
+  distributionScore += perf30d > 6 ? 1.2 : 0;
+  distributionScore += perf7d < 0 ? 1.6 : 0;
+  distributionScore += atr14Pct > atr30Pct * 0.95 ? 1.0 : 0;
+  markdownScore += perf30d < -5 ? 2.2 : 0;
+  markdownScore += perf90d < 0 ? 1.8 : 0;
+  markdownScore += rangePos30 < 40 ? 1.6 : 0;
+  markdownScore += perf7d < 0 ? 0.8 : 0;
+  markdownScore += atr14Pct >= atr30Pct ? 1.0 : 0;
+  const scored = [
+    { phase: "Accum Zone", score: accumulationScore, note: "The market looks more like a lower-range absorption environment where supply may be getting processed rather than a clean trend phase." },
+    { phase: "Markup", score: markupScore, note: "Momentum, range position and follow-through suggest the market is behaving more like an advancing markup phase." },
+    { phase: "Distribution", score: distributionScore, note: "The market is elevated in range position and follow-through is fading, which can fit a distribution-style environment." },
+    { phase: "Markdown", score: markdownScore, note: "Negative momentum and weak range position suggest the market is behaving more like a markdown phase than a stable base." },
+  ].sort((a, b) => b.score - a.score);
+  const best = scored[0], second = scored[1], gap = best.score - second.score;
+  let confidence = "Low";
+  if (gap >= 2.2) confidence = "High";
+  else if (gap >= 1.0) confidence = "Medium";
+  let stage = "Developing";
+  if (best.phase === "Accum Zone") stage = rangePos30 < 28 ? "Early" : rangePos30 < 45 ? "Mature" : "Late";
+  else if (best.phase === "Markup") stage = perf7d > 0 && perf30d > 8 ? "Expanding" : "Early";
+  else if (best.phase === "Distribution") stage = perf7d < 0 ? "Mature" : "Early";
+  else if (best.phase === "Markdown") stage = perf30d < -10 ? "Expanding" : "Early";
+  const rangeState = rangePos30 < 35 ? "Lower Range" : rangePos30 > 65 ? "Upper Range" : "Mid Range";
+  const momentumState = perf30d > 4 && perf7d > 0 ? "Improving" : perf30d < -4 || perf7d < 0 ? "Weakening" : "Mixed";
+  const volatilityState = atr14Pct < atr30Pct ? "Contracting" : atr14Pct > atr30Pct * 1.08 ? "Expanding" : "Stable";
+  return { phase: best.phase, confidence, stage, rangeState, momentumState, volatilityState, note: best.note, scoreGap: gap };
+}
+
+function getFlowReasoning(upsideDistance, downsideDistance, pressureLabel, trapLong, trapShort, wyckoff, atr14Pct, rangePos30) {
+  return [
+    { label: "Nearest Upside Liquidity", value: `${upsideDistance.toFixed(2)}%`, color: "#ff5c5c" },
+    { label: "Nearest Downside Liquidity", value: `${downsideDistance.toFixed(2)}%`, color: "#00d09c" },
+    { label: "Pressure Regime", value: pressureLabel, color: ofBadgeColor(pressureLabel) },
+    { label: "Long Trap Pressure", value: trapLong, color: ofBadgeColor(trapLong) },
+    { label: "Short Trap Pressure", value: trapShort, color: ofBadgeColor(trapShort) },
+    { label: "Wyckoff State", value: wyckoff, color: ofBadgeColor(wyckoff) },
+    { label: "Short-Term Volatility", value: ofFormatPercent(atr14Pct), color: atr14Pct > 3 ? "#ff5c5c" : "#00d09c" },
+    { label: "30D Range Position", value: `${clamp(rangePos30, 0, 100).toFixed(1)}%`, color: "#f5b942" },
+  ];
+}
+
+function getFlowInterpretation(pressureLabel, wyckoffPhase, longTrap, shortTrap) {
+  if (pressureLabel === "Upside Pull" && (wyckoffPhase === "Accumulation" || wyckoffPhase === "Accum Zone")) return { title: "How to read this signal", flowTone: "Constructive Flow", investorRead: "Recovery-aligned", confirmationNeed: "Market-supportive", body: "The market is showing a constructive combination of lower-range absorption with liquidity attraction above. This does not guarantee immediate upside, but it does suggest the flow layer is becoming more supportive rather than purely defensive." };
+  if (pressureLabel === "Downside Pull" && wyckoffPhase === "Markdown") return { title: "How to read this signal", flowTone: "Fragile Flow", investorRead: "Sell-off aligned", confirmationNeed: "Risk-sensitive", body: "The market still looks vulnerable. Downside liquidity remains more actionable and the flow structure behaves more like markdown than stabilisation." };
+  if (longTrap === "High") return { title: "How to read this signal", flowTone: "Fragile Flow", investorRead: "Crowded upside", confirmationNeed: "Wait for cleaner reset", body: "The market is stretched enough for long-side crowding risk to matter. Even if the bigger trend remains positive, weak short-term follow-through can still punish late buyers." };
+  if (shortTrap === "High") return { title: "How to read this signal", flowTone: "Constructive Flow", investorRead: "Short squeeze risk", confirmationNeed: "Needs macro support", body: "The market is depressed enough for short-side crowding risk to matter. This does not confirm a bigger reversal, but it does raise the probability of a squeeze or local rebound first." };
+  return { title: "How to read this signal", flowTone: "Mixed Flow", investorRead: "Stay selective", confirmationNeed: "Needs broader confirmation", body: "Order Flow here should be read as a confirmation layer, not as a standalone decision. It helps investors judge whether the current market behaviour supports, weakens, or delays the bigger thesis from Market and Intelligence." };
+}
+
+function getMarketLink(pressureLabel, wyckoffPhase) {
+  if (pressureLabel === "Upside Pull" && (wyckoffPhase === "Accumulation" || wyckoffPhase === "Accum Zone" || wyckoffPhase === "Markup")) return ["Use Market to check whether the broader phase also supports recovery or accumulation.", "Use Intelligence to confirm if Investor Attractiveness remains strong while flow improves.", "Watch whether Risk Level stays constructive as liquidity pressure leans upward."];
+  if (pressureLabel === "Downside Pull" || wyckoffPhase === "Markdown") return ["Use Market to confirm whether the cycle still leans toward sell-off risk rather than confirmed bottoming.", "Use Intelligence to check whether Risk Level is deteriorating with the weaker flow picture.", "Watch if Investor Bias weakens as downside liquidity remains more actionable."];
+  return ["Use Market to confirm whether the macro phase is improving or still mixed.", "Use Intelligence to check whether attractiveness and risk remain aligned with this flow backdrop.", "Treat this screen as the timing layer, not the only layer."];
+}
+
+function buildOrderFlowModel(metrics) {
+  const ladder = buildLiquidityLadder(metrics.price, metrics.high7d, metrics.low7d, metrics.high14d, metrics.low14d, metrics.high30d, metrics.low30d, metrics.high90d, metrics.low90d, metrics.nearTermHigh, metrics.nearTermLow, metrics.atr14Pct);
+  const pressure = getPressureResult(ladder.above[0]?.distancePct ?? 999, ladder.below[0]?.distancePct ?? 999, metrics.perf7d, metrics.perf30d, metrics.rangePos30);
+  const traps = getTrapEngine(metrics.perf7d, metrics.perf30d, metrics.rangePos30, metrics.shortVolatilityPct);
+  const wyckoff = getWyckoffEngine(metrics.perf7d, metrics.perf30d, metrics.perf90d, metrics.rangePos30, metrics.rangePos90, metrics.atr14Pct, metrics.atr30Pct);
+  const reasoning = getFlowReasoning(ladder.above[0]?.distancePct ?? 0, ladder.below[0]?.distancePct ?? 0, pressure.label, traps.longTrap, traps.shortTrap, wyckoff.phase, metrics.atr14Pct, metrics.rangePos30);
+  const interpretation = getFlowInterpretation(pressure.label, wyckoff.phase, traps.longTrap, traps.shortTrap);
+  const marketLink = getMarketLink(pressure.label, wyckoff.phase);
+  return { ladder, pressure, traps, wyckoff, reasoning, interpretation, marketLink };
+}
+
 async function getOrderFlowPayload() {
   const [tickerResult, dailyResult, h4Result] = await Promise.allSettled([
     fetchBinanceTicker24h(),
@@ -2280,37 +2456,28 @@ async function getOrderFlowPayload() {
     fetchBinanceKlines4h(180),
   ]);
 
- const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
-const dailyRaw = dailyResult.status === "fulfilled" ? dailyResult.value : null;
-const h4Raw = h4Result.status === "fulfilled" ? h4Result.value : null;
+  const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
+  const dailyRaw = dailyResult.status === "fulfilled" ? dailyResult.value : null;
+  const h4Raw = h4Result.status === "fulfilled" ? h4Result.value : null;
 
-const dataHealth = getDataHealth([
-  {
-    name: "ticker",
-    status: ticker ? "live" : "missing",
-  },
-  {
-    name: "dailyKlines",
-    status: Array.isArray(dailyRaw) && dailyRaw.length >= 90 ? "live" : "missing",
-  },
-  {
-    name: "h4Klines",
-    status: Array.isArray(h4Raw) && h4Raw.length >= 120 ? "live" : "missing",
-  },
-]);
+  const dataHealth = getDataHealth([
+    { name: "ticker", status: ticker ? "live" : "missing" },
+    { name: "dailyKlines", status: Array.isArray(dailyRaw) && dailyRaw.length >= 90 ? "live" : "missing" },
+    { name: "h4Klines", status: Array.isArray(h4Raw) && h4Raw.length >= 120 ? "live" : "missing" },
+  ]);
 
   const daily = Array.isArray(dailyRaw) ? dailyRaw : [];
   const h4 = Array.isArray(h4Raw) ? h4Raw : [];
 
-  const dailyCloses = daily.map((x) => number(x[4])).filter((v) => Number.isFinite(v) && v > 0);
-  const dailyHighs = daily.map((x) => number(x[2])).filter((v) => Number.isFinite(v) && v > 0);
-  const dailyLows = daily.map((x) => number(x[3])).filter((v) => Number.isFinite(v) && v > 0);
+  const dailyCloses = daily.map((x) => number(x[4], null)).filter((v) => Number.isFinite(v) && v > 0);
+  const dailyHighs = daily.map((x) => number(x[2], null)).filter((v) => Number.isFinite(v) && v > 0);
+  const dailyLows = daily.map((x) => number(x[3], null)).filter((v) => Number.isFinite(v) && v > 0);
 
-  const h4Highs = h4.map((x) => number(x[2])).filter((v) => Number.isFinite(v) && v > 0);
-  const h4Lows = h4.map((x) => number(x[3])).filter((v) => Number.isFinite(v) && v > 0);
+  const h4Highs = h4.map((x) => number(x[2], null)).filter((v) => Number.isFinite(v) && v > 0);
+  const h4Lows = h4.map((x) => number(x[3], null)).filter((v) => Number.isFinite(v) && v > 0);
 
-  const price = number(ticker?.lastPrice);
-  const change24h = number(ticker?.priceChangePercent);
+  const price = number(ticker?.lastPrice, null);
+  const change24h = number(ticker?.priceChangePercent, null);
 
   const prev7d = getCloseAtOffset(dailyCloses, 7);
   const prev30d = getCloseAtOffset(dailyCloses, 30);
@@ -2326,43 +2493,58 @@ const dataHealth = getDataHealth([
   const low90d = minOf(dailyLows.slice(-90));
 
   const h4RangesPct14 = h4.slice(-14).map((candle) => {
-    const high = number(candle[2]);
-    const low = number(candle[3]);
-    const close = number(candle[4]);
-    return close > 0 ? ((high - low) / close) * 100 : 0;
-  });
+    const high = number(candle[2], null);
+    const low = number(candle[3], null);
+    const close = number(candle[4], null);
+    return close > 0 && Number.isFinite(high) && Number.isFinite(low) ? ((high - low) / close) * 100 : null;
+  }).filter((v) => Number.isFinite(v));
 
   const h4RangesPct30 = h4.slice(-30).map((candle) => {
-    const high = number(candle[2]);
-    const low = number(candle[3]);
-    const close = number(candle[4]);
-    return close > 0 ? ((high - low) / close) * 100 : 0;
-  });
+    const high = number(candle[2], null);
+    const low = number(candle[3], null);
+    const close = number(candle[4], null);
+    return close > 0 && Number.isFinite(high) && Number.isFinite(low) ? ((high - low) / close) * 100 : null;
+  }).filter((v) => Number.isFinite(v));
 
   const dailyRangesPct7 = daily.slice(-7).map((candle) => {
-    const high = number(candle[2]);
-    const low = number(candle[3]);
-    const close = number(candle[4]);
-    return close > 0 ? ((high - low) / close) * 100 : 0;
-  });
+    const high = number(candle[2], null);
+    const low = number(candle[3], null);
+    const close = number(candle[4], null);
+    return close > 0 && Number.isFinite(high) && Number.isFinite(low) ? ((high - low) / close) * 100 : null;
+  }).filter((v) => Number.isFinite(v));
 
   const perf7d = percentChange(price, prev7d);
   const perf30d = percentChange(price, prev30d);
   const perf90d = percentChange(price, prev90d);
-
-  const atr14Pct = average(h4RangesPct14);
-  const atr30Pct = average(h4RangesPct30);
-
-  const range30 = Math.max(1, high30d - low30d);
-  const range90 = Math.max(1, high90d - low90d);
-
-  const rangePos30 = ((price - low30d) / range30) * 100;
-  const rangePos90 = ((price - low90d) / range90) * 100;
-
+  const atr14Pct = h4RangesPct14.length ? average(h4RangesPct14) : null;
+  const atr30Pct = h4RangesPct30.length ? average(h4RangesPct30) : null;
+  const rangePos30 = Number.isFinite(price) && Number.isFinite(high30d) && Number.isFinite(low30d) && high30d > low30d ? ((price - low30d) / (high30d - low30d)) * 100 : null;
+  const rangePos90 = Number.isFinite(price) && Number.isFinite(high90d) && Number.isFinite(low90d) && high90d > low90d ? ((price - low90d) / (high90d - low90d)) * 100 : null;
   const nearTermHigh = maxOf(h4Highs.slice(-18));
   const nearTermLow = minOf(h4Lows.slice(-18));
+  const shortVolatilityPct = dailyRangesPct7.length ? average(dailyRangesPct7) : null;
 
-  const shortVolatilityPct = average(dailyRangesPct7);
+  const orderFlow = buildOrderFlowModel({
+    price,
+    high7d,
+    low7d,
+    high14d,
+    low14d,
+    high30d,
+    low30d,
+    high90d,
+    low90d,
+    nearTermHigh,
+    nearTermLow,
+    atr14Pct: atr14Pct ?? 0,
+    atr30Pct: atr30Pct ?? atr14Pct ?? 0,
+    perf7d: perf7d ?? 0,
+    perf30d: perf30d ?? 0,
+    perf90d: perf90d ?? 0,
+    rangePos30: rangePos30 ?? 50,
+    rangePos90: rangePos90 ?? 50,
+    shortVolatilityPct: shortVolatilityPct ?? 0,
+  });
 
   return {
     price,
@@ -2386,6 +2568,7 @@ const dataHealth = getDataHealth([
     nearTermHigh,
     nearTermLow,
     shortVolatilityPct,
+    orderFlow,
   };
 }
 
