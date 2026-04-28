@@ -3061,16 +3061,27 @@ function intelGetWhaleSignal({ largeBuyValue, largeSellValue, whaleBuyValue, wha
   if (combinedTotal >= 100000) flowStrength = "Moderate";
   if (combinedTotal >= 500000) flowStrength = "Strong";
   if (combinedTotal >= 1500000) flowStrength = "Aggressive";
-  let label = "Low Large-Flow Activity";
-  let note = "Large players are currently quiet in the visible short-term flow, so this block should be read as low-signal rather than bearish.";
+
+  if (activity === "Low" && confidence === "High") {
+    confidence = combinedTotal >= 100000 ? "Medium" : "Low";
+  }
+
+  const isIsolatedLargeTrade = activity === "Low" && combinedTotal > 0;
+
+  let label = "Low Big-Player Activity";
+  let note = "Big players are quiet overall. A few larger trades can appear, but this is still a low-signal environment rather than a strong whale move.";
+  if (isIsolatedLargeTrade) {
+    label = "Isolated Large Trade";
+    note = "One or a few larger trades appeared, but overall big-player activity is still low. Treat this as isolated flow, not sustained whale participation.";
+  }
   if (direction === "Bullish" && activity !== "Low") {
-    label = "Buy-Side Large Flow";
-    note = "Visible large-flow activity leans to the buy side. This suggests stronger participation, but it still needs confirmation from broader structure.";
+    label = "Buy-Side Big-Player Flow";
+    note = "Visible big-player activity leans to the buy side. This suggests stronger participation, but it still needs confirmation from broader structure.";
   } else if (direction === "Bearish" && activity !== "Low") {
-    label = "Sell-Side Large Flow";
-    note = "Visible large-flow activity leans to the sell side. This weakens the short-term backdrop and raises caution.";
+    label = "Sell-Side Big-Player Flow";
+    note = "Visible big-player activity leans to the sell side. This weakens the short-term backdrop and raises caution.";
   } else if (activity !== "Low") {
-    label = "Balanced Large Flow";
+    label = "Balanced Big-Player Flow";
     note = "Large buyers and large sellers are active, but neither side has clear dominance yet. This is neutral, not automatically bearish.";
   }
   const buyValueText = combinedBuy > 0 ? intelFormatCompactMoney(combinedBuy) : "Low visible flow";
@@ -3096,14 +3107,14 @@ ${intelFormatCompactMoney(totalInstitutional)} institutional-sized prints`.trim(
 function intelGetRiskState(currentZone, regime, whaleLabel, zoneScoreHint, stableBiasLabel, flowPulseLabel) {
   const expensiveZone = currentZone === "Premium Zone" || currentZone === "Overheated Zone";
   const cheapZone = currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone";
-  if (expensiveZone && (["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel) || regime === "Bull Expansion" || stableBiasLabel === "Distribution Risk")) return "Late Pump Risk";
-  if (zoneScoreHint >= 7.4 && cheapZone && stableBiasLabel === "Accumulation Bias" && !["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel)) return "Accumulation Opportunity";
+  if (expensiveZone && (["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel) || regime === "Bull Expansion" || stableBiasLabel === "Distribution Risk")) return "Late Pump Risk";
+  if (zoneScoreHint >= 7.4 && cheapZone && stableBiasLabel === "Accumulation Bias" && !["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel)) return "Accumulation Opportunity";
   if (expensiveZone) return "Elevated Risk";
   if (cheapZone) {
-    if (flowPulseLabel === "Bearish Pulse" || ["Low Large-Flow Activity", "Low Whale Activity"].includes(whaleLabel) || stableBiasLabel === "Neutral Bias") return "Constructive but Fragile";
+    if (flowPulseLabel === "Bearish Pulse" || ["Low Big-Player Activity", "Isolated Large Trade", "Low Whale Activity"].includes(whaleLabel) || stableBiasLabel === "Neutral Bias") return "Constructive but Fragile";
     return "Constructive Structure";
   }
-  if (stableBiasLabel === "Distribution Risk" || ["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel)) return "Watchful Structure";
+  if (stableBiasLabel === "Distribution Risk" || ["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel)) return "Watchful Structure";
   return "Neutral Structure";
 }
 
@@ -3111,10 +3122,10 @@ function intelGetRiskLevelDetailed(riskState, currentZone, stableBiasLabel, whal
   if (riskState === "Late Pump Risk") return "High Risk";
   if (riskState === "Elevated Risk") return "Medium–High Risk";
   if (riskState === "Watchful Structure") return "Medium Risk";
-  if (riskState === "Neutral Structure") return stableBiasLabel === "Distribution Risk" || ["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel) ? "Medium–High Risk" : "Medium Risk";
+  if (riskState === "Neutral Structure") return stableBiasLabel === "Distribution Risk" || ["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel) ? "Medium–High Risk" : "Medium Risk";
   if (riskState === "Accumulation Opportunity") return "Low Risk";
   if (riskState === "Constructive but Fragile") return "Low–Medium Risk";
-  if (riskState === "Constructive Structure") return currentZone === "Accumulation Zone" && !["Buy-Side Large Flow", "Whale Accumulation"].includes(whaleLabel) ? "Low–Medium Risk" : "Low Risk";
+  if (riskState === "Constructive Structure") return currentZone === "Accumulation Zone" && !["Buy-Side Big-Player Flow", "Whale Accumulation"].includes(whaleLabel) ? "Low–Medium Risk" : "Low Risk";
   return "Medium Risk";
 }
 
@@ -3142,9 +3153,9 @@ function intelGetAttractivenessBreakdown(price, ma200w, riskLevel, currentZone, 
   }
   if (stableBiasLabel === "Accumulation Bias") participationScore += 0.4;
   if (stableBiasLabel === "Distribution Risk") participationScore -= 0.5;
-  if (["Buy-Side Large Flow", "Whale Accumulation"].includes(whaleLabel)) participationScore += 0.3;
-  if (["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel)) participationScore -= 0.4;
-  if (["Low Large-Flow Activity", "Low Whale Activity"].includes(whaleLabel)) participationScore -= 0.1;
+  if (["Buy-Side Big-Player Flow", "Whale Accumulation"].includes(whaleLabel)) participationScore += 0.3;
+  if (["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel)) participationScore -= 0.4;
+  if (["Low Big-Player Activity", "Isolated Large Trade", "Low Whale Activity"].includes(whaleLabel)) participationScore -= 0.1;
   const total = clamp(structureScore + riskScore + rangeScore + momentumScore + participationScore, 1.5, 8.8);
   return { total: Number(total.toFixed(1)), structureScore: Number(structureScore.toFixed(1)), riskScore: Number(riskScore.toFixed(1)), rangeScore: Number(rangeScore.toFixed(1)), momentumScore: Number(momentumScore.toFixed(1)), participationScore: Number(participationScore.toFixed(1)) };
 }
@@ -3189,7 +3200,7 @@ function intelGetEarlyRiskWarning(riskLevel, riskState, stableBiasLabel, whaleLa
   if (riskState === "Elevated Risk") warningScore += 1;
   if (riskState === "Late Pump Risk") warningScore += 2;
   if (stableBiasLabel === "Distribution Risk") warningScore += 2;
-  if (["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel)) warningScore += 1;
+  if (["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel)) warningScore += 1;
   if (shortTermRegime === "Bearish" || shortTermRegime === "Strong Bearish") warningScore += 1;
   if (currentZone === "Premium Zone") warningScore += 1;
   if (currentZone === "Overheated Zone") warningScore += 2;
