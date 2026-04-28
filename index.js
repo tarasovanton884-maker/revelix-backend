@@ -2752,6 +2752,291 @@ const dataHealth = getDataHealth([
   };
 }
 
+
+// Intelligence screen model moved from frontend. Keep this backend-driven.
+function intelFormatCompactMoney(value) {
+  if (!Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function intelGetMarketRegime(change24h) {
+  if (change24h >= 4) return "Bull Expansion";
+  if (change24h <= -4) return "Bear Pressure";
+  return "Balanced Regime";
+}
+
+function intelGetFlowPulse(buyPressure, sellPressure, change24h) {
+  const total = buyPressure + sellPressure;
+  const edge = total > 0 ? Math.abs(buyPressure - sellPressure) / total : 0;
+  if (buyPressure > sellPressure && edge > 0.12 && change24h > 0) return { label: "Bullish Pulse", color: "#00d09c", text: "Short-term live participation currently leans to the buy side." };
+  if (sellPressure > buyPressure && edge > 0.12 && change24h < 0) return { label: "Bearish Pulse", color: "#ff5c5c", text: "Short-term live participation currently leans to the sell side." };
+  return { label: "Neutral Pulse", color: "#f5b942", text: "Short-term live participation is mixed right now." };
+}
+
+function intelGetCurrentZone(price, deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper) {
+  if (price <= deepValueUpper) return "Deep Value Zone";
+  if (price <= accumulationUpper) return "Accumulation Zone";
+  if (price <= fairValueUpper) return "Fair Value Zone";
+  if (price <= premiumUpper) return "Premium Zone";
+  return "Overheated Zone";
+}
+
+function intelGetZoneExplanation(zone) {
+  if (zone === "Deep Value Zone") return "Bitcoin is in the cheapest part of its broader 52-week structure.";
+  if (zone === "Accumulation Zone") return "Bitcoin is in the core long-term accumulation band.";
+  if (zone === "Fair Value Zone") return "Bitcoin is in the middle of its broader structure.";
+  if (zone === "Premium Zone") return "Bitcoin is above fair value and closer to an expensive area.";
+  return "Bitcoin is in the upper extreme of its yearly structure.";
+}
+
+function intelGetConfidenceState(confidence) {
+  if (confidence >= 78) return { label: "Strong", note: "The signal has a strong confirmed edge right now." };
+  if (confidence >= 64) return { label: "Confirmed", note: "The signal is confirmed and backed by multiple aligned inputs." };
+  if (confidence >= 52) return { label: "Building", note: "The edge is forming, but it still needs stronger follow-through." };
+  return { label: "Weak Edge", note: "There is some directional edge, but conviction is still limited." };
+}
+
+function intelGetWhaleSignal({ largeBuyValue, largeSellValue, whaleBuyValue, whaleSellValue, institutionalBuyValue, institutionalSellValue }) {
+  const totalLarge = largeBuyValue + largeSellValue;
+  const totalWhale = whaleBuyValue + whaleSellValue;
+  const totalInstitutional = institutionalBuyValue + institutionalSellValue;
+  const totalVisible = totalLarge + totalWhale + totalInstitutional;
+  const combinedBuy = largeBuyValue + whaleBuyValue + institutionalBuyValue;
+  const combinedSell = largeSellValue + whaleSellValue + institutionalSellValue;
+  const combinedTotal = combinedBuy + combinedSell;
+  let activity = "Low";
+  if (totalVisible >= 300000) activity = "Moderate";
+  if (totalVisible >= 1200000) activity = "High";
+  if (totalVisible >= 4000000) activity = "Very High";
+  let direction = "Balanced";
+  if (combinedTotal > 0) {
+    if (combinedBuy > combinedSell * 1.15) direction = "Bullish";
+    if (combinedSell > combinedBuy * 1.15) direction = "Bearish";
+  }
+  let confidence = "Low";
+  if (combinedTotal > 0) {
+    const edge = Math.abs(combinedBuy - combinedSell) / combinedTotal;
+    if (edge >= 0.12) confidence = "Medium";
+    if (edge >= 0.28) confidence = "High";
+  }
+  let flowStrength = "Weak";
+  if (combinedTotal >= 100000) flowStrength = "Moderate";
+  if (combinedTotal >= 500000) flowStrength = "Strong";
+  if (combinedTotal >= 1500000) flowStrength = "Aggressive";
+  let label = "Low Large-Flow Activity";
+  let note = "Large players are currently quiet in the visible short-term flow, so this block should be read as low-signal rather than bearish.";
+  if (direction === "Bullish" && activity !== "Low") {
+    label = "Buy-Side Large Flow";
+    note = "Visible large-flow activity leans to the buy side. This suggests stronger participation, but it still needs confirmation from broader structure.";
+  } else if (direction === "Bearish" && activity !== "Low") {
+    label = "Sell-Side Large Flow";
+    note = "Visible large-flow activity leans to the sell side. This weakens the short-term backdrop and raises caution.";
+  } else if (activity !== "Low") {
+    label = "Balanced Large Flow";
+    note = "Large buyers and large sellers are active, but neither side has clear dominance yet. This is neutral, not automatically bearish.";
+  }
+  const buyValueText = combinedBuy > 0 ? intelFormatCompactMoney(combinedBuy) : "Low visible flow";
+  const sellValueText = combinedSell > 0 ? intelFormatCompactMoney(combinedSell) : "Low visible flow";
+  const ratioText = combinedTotal > 0 ? `
+${((combinedBuy / combinedTotal) * 100).toFixed(1)}% buy share`.trim() : "No meaningful ratio yet";
+  const dominantDifference = Math.abs(combinedBuy - combinedSell);
+  const dominantSideText = combinedTotal <= 0 ? "No dominant side" : direction === "Bullish" ? "Buy-side edge" : direction === "Bearish" ? "Sell-side edge" : "Balanced large prints";
+  const dominantFlowText = combinedTotal <= 0 ? "No meaningful large-flow dominance yet" : direction === "Balanced" ? "Large buy and sell activity are close to balanced" : `
+${intelFormatCompactMoney(dominantDifference)} difference between visible large buys and sells`.trim();
+  return {
+    label, activity, direction, confidence, flowStrength,
+    largeFlow: totalLarge > 0 ? `
+${intelFormatCompactMoney(totalLarge)} visible`.trim() : "No strong large-flow sample",
+    whaleFlow: totalWhale > 0 ? `
+${intelFormatCompactMoney(totalWhale)} whale prints`.trim() : "No clear whale prints",
+    institutionalFlow: totalInstitutional > 0 ? `
+${intelFormatCompactMoney(totalInstitutional)} institutional-sized prints`.trim() : "No visible institutional prints",
+    buyValueText, sellValueText, ratioText, dominantSideText, dominantFlowText, note,
+  };
+}
+
+function intelGetRiskState(currentZone, regime, whaleLabel, zoneScoreHint, stableBiasLabel, flowPulseLabel) {
+  const expensiveZone = currentZone === "Premium Zone" || currentZone === "Overheated Zone";
+  const cheapZone = currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone";
+  if (expensiveZone && (["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel) || regime === "Bull Expansion" || stableBiasLabel === "Distribution Risk")) return "Late Pump Risk";
+  if (zoneScoreHint >= 7.4 && cheapZone && stableBiasLabel === "Accumulation Bias" && !["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel)) return "Accumulation Opportunity";
+  if (expensiveZone) return "Elevated Risk";
+  if (cheapZone) {
+    if (flowPulseLabel === "Bearish Pulse" || ["Low Large-Flow Activity", "Low Whale Activity"].includes(whaleLabel) || stableBiasLabel === "Neutral Bias") return "Constructive but Fragile";
+    return "Constructive Structure";
+  }
+  if (stableBiasLabel === "Distribution Risk" || ["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel)) return "Watchful Structure";
+  return "Neutral Structure";
+}
+
+function intelGetRiskLevelDetailed(riskState, currentZone, stableBiasLabel, whaleLabel) {
+  if (riskState === "Late Pump Risk") return "High Risk";
+  if (riskState === "Elevated Risk") return "Medium–High Risk";
+  if (riskState === "Watchful Structure") return "Medium Risk";
+  if (riskState === "Neutral Structure") return stableBiasLabel === "Distribution Risk" || ["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel) ? "Medium–High Risk" : "Medium Risk";
+  if (riskState === "Accumulation Opportunity") return "Low Risk";
+  if (riskState === "Constructive but Fragile") return "Low–Medium Risk";
+  if (riskState === "Constructive Structure") return currentZone === "Accumulation Zone" && !["Buy-Side Large Flow", "Whale Accumulation"].includes(whaleLabel) ? "Low–Medium Risk" : "Low Risk";
+  return "Medium Risk";
+}
+
+function intelGetAttractivenessBreakdown(price, ma200w, riskLevel, currentZone, stableBiasLabel, whaleLabel) {
+  let structureScore = 0, riskScore = 0, momentumScore = 0, rangeScore = 0, participationScore = 0;
+  if (currentZone === "Deep Value Zone") structureScore = 4.2;
+  if (currentZone === "Accumulation Zone") structureScore = 3.1;
+  if (currentZone === "Fair Value Zone") structureScore = 1.8;
+  if (currentZone === "Premium Zone") structureScore = 0.7;
+  if (currentZone === "Overheated Zone") structureScore = 0.2;
+  if (riskLevel === "Low Risk") riskScore = 2.0;
+  if (riskLevel === "Low–Medium Risk") riskScore = 1.2;
+  if (riskLevel === "Medium Risk") riskScore = 0.2;
+  if (riskLevel === "Medium–High Risk") riskScore = -0.9;
+  if (riskLevel === "High Risk") riskScore = -1.8;
+  if (ma200w > 0) {
+    const ratio = price / ma200w;
+    if (ratio < 1.0) rangeScore = 1.8;
+    else if (ratio < 1.15) rangeScore = 1.3;
+    else if (ratio < 1.35) rangeScore = 0.8;
+    else if (ratio < 1.6) rangeScore = 0.1;
+    else rangeScore = -0.8;
+    if (ratio > 1.9) momentumScore = -1.4;
+    else if (ratio > 1.7) momentumScore = -0.8;
+  }
+  if (stableBiasLabel === "Accumulation Bias") participationScore += 0.4;
+  if (stableBiasLabel === "Distribution Risk") participationScore -= 0.5;
+  if (["Buy-Side Large Flow", "Whale Accumulation"].includes(whaleLabel)) participationScore += 0.3;
+  if (["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel)) participationScore -= 0.4;
+  if (["Low Large-Flow Activity", "Low Whale Activity"].includes(whaleLabel)) participationScore -= 0.1;
+  const total = clamp(structureScore + riskScore + rangeScore + momentumScore + participationScore, 1.5, 8.8);
+  return { total: Number(total.toFixed(1)), structureScore: Number(structureScore.toFixed(1)), riskScore: Number(riskScore.toFixed(1)), rangeScore: Number(rangeScore.toFixed(1)), momentumScore: Number(momentumScore.toFixed(1)), participationScore: Number(participationScore.toFixed(1)) };
+}
+
+function intelGetAttractivenessLabel(score) {
+  if (score >= 8.5) return "Very Attractive";
+  if (score >= 7) return "Attractive";
+  if (score >= 5) return "Balanced";
+  if (score >= 3) return "Selective";
+  return "Unattractive";
+}
+
+function intelGetShortTermRegime(change24h, buyPressure, sellPressure, whaleDirection) {
+  const flowEdge = Math.abs(buyPressure - sellPressure) / (buyPressure + sellPressure || 1);
+  if (change24h > 2 && flowEdge > 0.15 && whaleDirection === "Bullish") return "Strong Bullish";
+  if (change24h < -2 && flowEdge > 0.15 && whaleDirection === "Bearish") return "Strong Bearish";
+  if (change24h > 1) return "Bullish";
+  if (change24h < -1) return "Bearish";
+  return "Neutral";
+}
+
+function intelGetMediumTermRegime(zone, whaleDirection, zoneScore, stableBiasLabel, riskState) {
+  if ((zone === "Deep Value Zone" || zone === "Accumulation Zone") && whaleDirection === "Bullish" && stableBiasLabel === "Accumulation Bias") return "Accumulation Phase";
+  if (zoneScore >= 7 && stableBiasLabel === "Accumulation Bias" && riskState !== "Constructive but Fragile") return "Re-Accumulation";
+  if (zone === "Fair Value Zone" || stableBiasLabel === "Neutral Bias" || riskState === "Watchful Structure") return "Transition Phase";
+  return "Distribution Phase";
+}
+
+function intelGetLongTermRegime(price, ma200w, zone) {
+  if (ma200w <= 0) return "Neutral";
+  const ratio = price / ma200w;
+  if (ratio < 1.1 && zone !== "Overheated Zone") return "Long-Term Accumulation";
+  if (ratio < 1.6) return "Growth Structure";
+  return "Overextended Cycle";
+}
+
+function intelGetEarlyRiskWarning(riskLevel, riskState, stableBiasLabel, whaleLabel, shortTermRegime, currentZone) {
+  let warningScore = 0;
+  if (riskLevel === "Medium Risk") warningScore += 1;
+  if (riskLevel === "Medium–High Risk") warningScore += 2;
+  if (riskLevel === "High Risk") warningScore += 3;
+  if (riskState === "Elevated Risk") warningScore += 1;
+  if (riskState === "Late Pump Risk") warningScore += 2;
+  if (stableBiasLabel === "Distribution Risk") warningScore += 2;
+  if (["Sell-Side Large Flow", "Whale Distribution"].includes(whaleLabel)) warningScore += 1;
+  if (shortTermRegime === "Bearish" || shortTermRegime === "Strong Bearish") warningScore += 1;
+  if (currentZone === "Premium Zone") warningScore += 1;
+  if (currentZone === "Overheated Zone") warningScore += 2;
+  if (currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone") warningScore -= 1;
+  if (warningScore <= 1) return { label: "Risk Stable", strength: "Low", note: "The environment does not currently show strong early deterioration signals. Risk still exists, but the broader structure is not flashing a clear warning yet." };
+  if (warningScore <= 3) return { label: "Risk Rising", strength: "Medium", note: "Some early signs of structural weakening are appearing. This is not a full breakdown signal, but it does suggest that risk is starting to build beneath the surface." };
+  return { label: "Risk Active", strength: "High", note: "Multiple inputs now suggest that market risk is no longer only theoretical. The environment is becoming less supportive and downside sensitivity is more relevant." };
+}
+
+function intelGetLinkToMarket(riskLevel, currentZone, stableBiasLabel, warningLabel) {
+  if ((currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone") && stableBiasLabel === "Accumulation Bias" && warningLabel === "Risk Stable") return ["Use Market to confirm that the broader phase still supports accumulation rather than renewed sell-off pressure.", "Check whether the current Market scenario still points to bottom-building or constructive recovery conditions.", "Watch if Market value zones continue to support the current attractiveness reading."];
+  if (riskLevel === "Medium–High Risk" || riskLevel === "High Risk" || warningLabel === "Risk Active") return ["Use Market to confirm whether the broader cycle is shifting toward renewed downside or late-cycle risk.", "Check whether the Market Scenario Engine is weakening the current investment thesis.", "Watch if macro support levels in Market are still holding or starting to fail."];
+  return ["Use Market to confirm whether the broader phase supports this intelligence reading or still remains mixed.", "Check whether the Market scenario still aligns with the current risk and attractiveness profile.", "Watch if macro structure in Market is strengthening enough to validate this environment."];
+}
+
+function intelGetIntelligenceComment(regime, bias, risk, zone, score) {
+  if (risk === "Late Pump Risk") return "Price is high in structure while participation quality is weakening.";
+  if (risk === "Accumulation Opportunity") return "Structure, price location and stronger participation are aligned positively.";
+  if (zone === "Fair Value Zone" && bias === "Neutral Bias") return "BTC is in a balanced area of the cycle. Better for patience than aggression.";
+  if (score >= 8) return "Current structure looks attractive for long-term investors.";
+  if (score <= 3) return "Current structure looks expensive relative to the medium-term framework.";
+  if (regime === "Bull Expansion") return "Momentum is constructive, but structure still matters more than hype.";
+  return "Focus on price location first, then on participation quality.";
+}
+
+function intelMapBiasLabel(backendBias) {
+  if (backendBias === "Accumulation" || backendBias === "Accumulation Bias" || backendBias === "Deep Value") return "Accumulation Bias";
+  if (backendBias === "Distribution Risk") return "Distribution Risk";
+  return "Neutral Bias";
+}
+
+function intelBuildStableBiasModel({ backendBias, flowScore, whaleScore, institutionalScore, investorAttractiveness, flowPressureEdge, pendingBias, pendingBiasCount }) {
+  const mappedLabel = intelMapBiasLabel(backendBias);
+  const combinedAbsScore = Math.abs(flowScore) * 0.4 + Math.abs(whaleScore) * 0.35 + Math.abs(institutionalScore) * 0.25;
+  const positiveVotes = [flowScore, whaleScore, institutionalScore].filter((score) => score > 0).length;
+  const negativeVotes = [flowScore, whaleScore, institutionalScore].filter((score) => score < 0).length;
+  const alignedVotes = Math.max(positiveVotes, negativeVotes);
+  const mixedPenalty = positiveVotes > 0 && negativeVotes > 0 ? 6 : 0;
+  let confidence = Math.round(42 + Math.min(34, combinedAbsScore * 1.25) + Math.min(10, Math.max(0, investorAttractiveness - 5) * 2.2) + alignedVotes * 3 - mixedPenalty);
+  if (mappedLabel === "Accumulation Bias" || mappedLabel === "Distribution Risk") {
+    if (flowPressureEdge > 0.1) confidence += 4;
+    confidence = clamp(confidence, 46, 93);
+  } else {
+    confidence = clamp(Math.round(confidence * 0.86), 38, 76);
+  }
+  const pendingLabel = pendingBias ? intelMapBiasLabel(pendingBias) : null;
+  const state = pendingLabel && pendingLabel !== mappedLabel ? "Building" : "Stable";
+  const note = state === "Building" ? `
+A possible shift toward ${pendingLabel} is forming, but it needs more confirmation before replacing the stable bias.`.trim() : mappedLabel === "Accumulation Bias" ? "Backend-confirmed accumulation conditions are holding across updates." : mappedLabel === "Distribution Risk" ? "Backend-confirmed distribution pressure is holding across updates." : "Current conditions remain mixed, so no stronger investor bias is confirmed yet.";
+  return { label: mappedLabel, confidence, state, pendingLabel, pendingCount: pendingBiasCount || 0, note };
+}
+
+function buildIntelligenceModel(payload) {
+  const { price, change24h, buyPressure, sellPressure, largeBuyValue, largeSellValue, whaleBuyValue, whaleSellValue, institutionalBuyValue, institutionalSellValue, yearlyHigh, yearlyLow, ma200w, deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper, rawInvestorAttractiveness, investorBias, flowScore, whaleScore, institutionalScore, pendingBias, pendingBiasCount } = payload;
+  const regime = intelGetMarketRegime(change24h);
+  const flowPulse = intelGetFlowPulse(buyPressure, sellPressure, change24h);
+  const flowPressureEdge = buyPressure + sellPressure > 0 ? Math.abs(buyPressure - sellPressure) / (buyPressure + sellPressure) : 0;
+  const stableBias = intelBuildStableBiasModel({ backendBias: investorBias, flowScore, whaleScore, institutionalScore, investorAttractiveness: rawInvestorAttractiveness, flowPressureEdge, pendingBias, pendingBiasCount });
+  const confidenceState = intelGetConfidenceState(stableBias.confidence);
+  const whaleSignal = intelGetWhaleSignal({ largeBuyValue, largeSellValue, whaleBuyValue, whaleSellValue, institutionalBuyValue, institutionalSellValue });
+  const currentZone = intelGetCurrentZone(price, deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper);
+  const preliminaryRiskState = intelGetRiskState(currentZone, regime, whaleSignal.label, rawInvestorAttractiveness, stableBias.label, flowPulse.label);
+  const preliminaryRiskLevel = intelGetRiskLevelDetailed(preliminaryRiskState, currentZone, stableBias.label, whaleSignal.label);
+  const breakdownBase = intelGetAttractivenessBreakdown(price, ma200w, preliminaryRiskLevel, currentZone, stableBias.label, whaleSignal.label);
+  const zoneScore = Number(clamp(rawInvestorAttractiveness * 0.65 + breakdownBase.total * 0.35, 1.5, 8.8).toFixed(1));
+  const participationShift = zoneScore - breakdownBase.total;
+  const breakdown = { ...breakdownBase, participationScore: Number((breakdownBase.participationScore + participationShift).toFixed(1)), total: zoneScore };
+  const riskState = intelGetRiskState(currentZone, regime, whaleSignal.label, zoneScore, stableBias.label, flowPulse.label);
+  const riskLevel = intelGetRiskLevelDetailed(riskState, currentZone, stableBias.label, whaleSignal.label);
+  const attractiveness = intelGetAttractivenessLabel(zoneScore);
+  const shortTermRegime = intelGetShortTermRegime(change24h, buyPressure, sellPressure, whaleSignal.direction);
+  const mediumTermRegime = intelGetMediumTermRegime(currentZone, whaleSignal.direction, zoneScore, stableBias.label, riskState);
+  const longTermRegime = intelGetLongTermRegime(price, ma200w, currentZone);
+  const earlyRisk = intelGetEarlyRiskWarning(riskLevel, riskState, stableBias.label, whaleSignal.label, shortTermRegime, currentZone);
+  const linkToMarket = intelGetLinkToMarket(riskLevel, currentZone, stableBias.label, earlyRisk.label);
+  const zoneExplanation = intelGetZoneExplanation(currentZone);
+  const intelligenceComment = intelGetIntelligenceComment(regime, stableBias.label, riskState, currentZone, zoneScore);
+  return { regime, flowPulse, stableBias, confidenceState, whaleSignal, currentZone, structuralZone: { label: currentZone, description: zoneExplanation, levels: { deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper, ma200w, yearlyHigh, yearlyLow } }, riskState, riskLevel, breakdown, zoneScore, attractiveness, shortTermRegime, mediumTermRegime, longTermRegime, earlyRisk, linkToMarket, intelligenceComment, attractivenessModel: { score: zoneScore, label: attractiveness, breakdown, note: "Conservative composite score based mainly on structure, risk and long-term positioning, with only small participation adjustments." }, investorBiasModel: stableBias, whaleFlowModel: whaleSignal };
+}
+
 async function getIntelligencePayload() {
   const [tickerResult, tradesResult, weeklyResult] = await Promise.allSettled([
     fetchBinanceTicker24h(),
@@ -2935,10 +3220,41 @@ const dataHealth = getDataHealth([
   INTELLIGENCE_STATE.stableAttractiveness = rawInvestorAttractiveness;
   INTELLIGENCE_STATE.lastUpdatedAt = Date.now();
 
+  const intelligenceModel = buildIntelligenceModel({
+    price,
+    change24h,
+    buyPressure,
+    sellPressure,
+    largeBuyValue,
+    largeSellValue,
+    whaleBuyValue,
+    whaleSellValue,
+    institutionalBuyValue,
+    institutionalSellValue,
+    yearlyHigh,
+    yearlyLow,
+    ma200w,
+    deepValueUpper,
+    accumulationUpper,
+    fairValueUpper,
+    premiumUpper,
+    rawInvestorAttractiveness,
+    investorBias: stableBias,
+    flowScore,
+    whaleScore,
+    institutionalScore,
+    pendingBias: INTELLIGENCE_STATE.pendingBias,
+    pendingBiasCount: INTELLIGENCE_STATE.pendingBiasCount,
+  });
+
   return {
     price,
     change24h,
     dataHealth,
+    intelligenceModel,
+    flowScore: Number(flowScore.toFixed(2)),
+    whaleScore: Number(whaleScore.toFixed(2)),
+    institutionalScore: Number(institutionalScore.toFixed(2)),
     buyPressure,
     sellPressure,
     largeBuyValue,
