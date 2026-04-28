@@ -9,6 +9,14 @@ app.use(cors());
 app.use(express.json());
 
 const CACHE = new Map();
+const INFLIGHT = new Map();
+const SNAPSHOT_RUNTIME = {
+  startedAt: new Date().toISOString(),
+  lastWarmupAt: null,
+  lastWarmupOkAt: null,
+  lastWarmupError: null,
+  warmupCount: 0,
+};
 let LAST_GOOD_TICKER = null;
 
 function isValidTicker(ticker) {
@@ -149,22 +157,61 @@ async function withCache(key, ttlMs, fn, options = {}) {
   const cached = getCache(key);
   if (cached !== null) return cached;
 
-  try {
-    const fresh = await fn();
-    if (fresh !== null && fresh !== undefined) {
-      setCache(key, fresh, ttlMs);
-    }
-    return fresh;
-  } catch (error) {
-    if (allowStaleOnError) {
-      const stale = getCache(key, true);
-      if (stale !== null) {
-        console.warn(`Using stale cache for ${key}:`, error.message);
-        return stale;
+  if (INFLIGHT.has(key)) {
+    try {
+      return await INFLIGHT.get(key);
+    } catch (error) {
+      if (allowStaleOnError) {
+        const stale = getCache(key, true);
+        if (stale !== null) {
+          console.warn(`Using stale cache for ${key} after inflight error:`, error.message);
+          return stale;
+        }
       }
+      throw error;
     }
-    throw error;
   }
+
+  const task = (async () => {
+    try {
+      const fresh = await fn();
+      if (fresh !== null && fresh !== undefined) {
+        setCache(key, fresh, ttlMs);
+      }
+      return fresh;
+    } catch (error) {
+      if (allowStaleOnError) {
+        const stale = getCache(key, true);
+        if (stale !== null) {
+          console.warn(`Using stale cache for ${key}:`, error.message);
+          return stale;
+        }
+      }
+      throw error;
+    } finally {
+      INFLIGHT.delete(key);
+    }
+  })();
+
+  INFLIGHT.set(key, task);
+  return task;
+}
+
+function getCacheMeta(key) {
+  const entry = CACHE.get(key);
+  if (!entry) {
+    return { key, status: "missing", expiresInMs: null, staleForMs: null };
+  }
+
+  const now = Date.now();
+  const expiresInMs = entry.expiresAt - now;
+
+  return {
+    key,
+    status: expiresInMs >= 0 ? "fresh" : "stale",
+    expiresInMs,
+    staleForMs: expiresInMs < 0 ? Math.abs(expiresInMs) : 0,
+  };
 }
 
 function sleep(ms) {
@@ -637,13 +684,13 @@ function calculateInvestorAttractiveness({
 const DASHBOARD_TTL = 30 * 1000;
 const MARKET_DATA_TTL = 30 * 1000;
 const ORDER_FLOW_TTL = 30 * 1000;
-const MARKET_ADVANCED_TTL = 15 * 1000;
-const INTELLIGENCE_TTL = 30 * 1000;
+const MARKET_ADVANCED_TTL = 60 * 1000;
+const INTELLIGENCE_TTL = 60 * 1000;
 
 const BINANCE_TICKER_TTL = 30 * 1000;
 const BINANCE_KLINES_1D_TTL = 60 * 1000;
-const BINANCE_KLINES_4H_TTL = 30 * 1000;
-const BINANCE_KLINES_1W_TTL = 2 * 60 * 1000;
+const BINANCE_KLINES_4H_TTL = 60 * 1000;
+const BINANCE_KLINES_1W_TTL = 5 * 60 * 1000;
 const BINANCE_TRADES_TTL = 30 * 1000;
 
 const COINGECKO_TTL = 3 * 60 * 60 * 1000;
@@ -3455,12 +3502,92 @@ const dataHealth = getDataHealth([
   };
 }
 
+
+async function warmSnapshot(key, ttlMs, loader) {
+  try {
+    await withCache(key, ttlMs, loader, { allowStaleOnError: true });
+    return { key, ok: true };
+  } catch (error) {
+    console.warn(`Snapshot warmup failed for ${key}:`, error.message);
+    return { key, ok: false, error: error.message };
+  }
+}
+
+async function warmCoreSnapshots() {
+  SNAPSHOT_RUNTIME.lastWarmupAt = new Date().toISOString();
+  SNAPSHOT_RUNTIME.warmupCount += 1;
+
+  const results = await Promise.all([
+    warmSnapshot("dashboard", DASHBOARD_TTL, getDashboardPayload),
+    warmSnapshot("market-data", MARKET_DATA_TTL, getMarketDataPayload),
+    warmSnapshot("order-flow", ORDER_FLOW_TTL, getOrderFlowPayload),
+    warmSnapshot("market-advanced", MARKET_ADVANCED_TTL, getMarketAdvancedPayload),
+    warmSnapshot("intelligence", INTELLIGENCE_TTL, getIntelligencePayload),
+  ]);
+
+  const failed = results.filter((result) => !result.ok);
+
+  if (failed.length) {
+    SNAPSHOT_RUNTIME.lastWarmupError = failed
+      .map((result) => `${result.key}: ${result.error}`)
+      .join(" | ");
+  } else {
+    SNAPSHOT_RUNTIME.lastWarmupOkAt = new Date().toISOString();
+    SNAPSHOT_RUNTIME.lastWarmupError = null;
+  }
+
+  return results;
+}
+
+function buildBackendHealth() {
+  return {
+    ok: true,
+    time: new Date().toISOString(),
+    runtime: SNAPSHOT_RUNTIME,
+    cache: {
+      dashboard: getCacheMeta("dashboard"),
+      marketData: getCacheMeta("market-data"),
+      orderFlow: getCacheMeta("order-flow"),
+      marketAdvanced: getCacheMeta("market-advanced"),
+      intelligence: getCacheMeta("intelligence"),
+      binanceTicker: getCacheMeta("binance_ticker_24h"),
+      dailyKlines120: getCacheMeta("binance_klines_1d_120"),
+      dailyKlines400: getCacheMeta("binance_klines_1d_400"),
+      h4Klines180: getCacheMeta("binance_klines_4h_180"),
+      weeklyKlines260: getCacheMeta("binance_klines_1w_260"),
+      trades1000: getCacheMeta("binance_trades_1000"),
+      coingecko: getCacheMeta("coingecko_global"),
+      fearGreed: getCacheMeta("fear_greed"),
+    },
+    inflight: Array.from(INFLIGHT.keys()),
+    lastGoodTicker: {
+      available: Boolean(LAST_GOOD_TICKER),
+      lastPrice: LAST_GOOD_TICKER?.lastPrice ?? null,
+    },
+    intelligenceState: {
+      stableBias: INTELLIGENCE_STATE.stableBias,
+      stableBiasConfidence: INTELLIGENCE_STATE.stableBiasConfidence,
+      stableAttractiveness: INTELLIGENCE_STATE.stableAttractiveness,
+      pendingBias: INTELLIGENCE_STATE.pendingBias,
+      pendingBiasCount: INTELLIGENCE_STATE.pendingBiasCount,
+      bootstrapped: INTELLIGENCE_STATE.bootstrapped,
+      lastBiasCommitAt: INTELLIGENCE_STATE.lastBiasCommitAt
+        ? new Date(INTELLIGENCE_STATE.lastBiasCommitAt).toISOString()
+        : null,
+      lastAttractivenessCommitAt: INTELLIGENCE_STATE.lastAttractivenessCommitAt
+        ? new Date(INTELLIGENCE_STATE.lastAttractivenessCommitAt).toISOString()
+        : null,
+    },
+  };
+}
+
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
     name: "Revelix Backend",
     endpoints: [
       "/health",
+      "/api/health",
       "/api/dashboard",
       "/api/market-data",
       "/api/order-flow",
@@ -3488,6 +3615,10 @@ app.get("/health", async (_req, res) => {
     time: new Date().toISOString(),
     pushTokens: tokenCount,
   });
+});
+
+app.get("/api/health", (_req, res) => {
+  res.json(buildBackendHealth());
 });
 
 app.post("/api/push/register", async (req, res) => {
@@ -3678,6 +3809,14 @@ app.get("/api/debug/binance", async (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Revelix backend is running on port ${PORT}`);
+
+  setTimeout(() => {
+    warmCoreSnapshots();
+  }, 5 * 1000);
+
+  setInterval(() => {
+    warmCoreSnapshots();
+  }, 30 * 1000);
 
   setTimeout(() => {
     processPushSignals();
