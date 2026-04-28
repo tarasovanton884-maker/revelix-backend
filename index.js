@@ -10,13 +10,6 @@ app.use(express.json());
 
 const CACHE = new Map();
 const INFLIGHT = new Map();
-const SNAPSHOT_RUNTIME = {
-  startedAt: new Date().toISOString(),
-  lastWarmupAt: null,
-  lastWarmupOkAt: null,
-  lastWarmupError: null,
-  warmupCount: 0,
-};
 let LAST_GOOD_TICKER = null;
 
 function isValidTicker(ticker) {
@@ -158,21 +151,10 @@ async function withCache(key, ttlMs, fn, options = {}) {
   if (cached !== null) return cached;
 
   if (INFLIGHT.has(key)) {
-    try {
-      return await INFLIGHT.get(key);
-    } catch (error) {
-      if (allowStaleOnError) {
-        const stale = getCache(key, true);
-        if (stale !== null) {
-          console.warn(`Using stale cache for ${key} after inflight error:`, error.message);
-          return stale;
-        }
-      }
-      throw error;
-    }
+    return INFLIGHT.get(key);
   }
 
-  const task = (async () => {
+  const promise = (async () => {
     try {
       const fresh = await fn();
       if (fresh !== null && fresh !== undefined) {
@@ -193,25 +175,8 @@ async function withCache(key, ttlMs, fn, options = {}) {
     }
   })();
 
-  INFLIGHT.set(key, task);
-  return task;
-}
-
-function getCacheMeta(key) {
-  const entry = CACHE.get(key);
-  if (!entry) {
-    return { key, status: "missing", expiresInMs: null, staleForMs: null };
-  }
-
-  const now = Date.now();
-  const expiresInMs = entry.expiresAt - now;
-
-  return {
-    key,
-    status: expiresInMs >= 0 ? "fresh" : "stale",
-    expiresInMs,
-    staleForMs: expiresInMs < 0 ? Math.abs(expiresInMs) : 0,
-  };
+  INFLIGHT.set(key, promise);
+  return promise;
 }
 
 function sleep(ms) {
@@ -281,17 +246,20 @@ async function fetchJsonWithStaleFallback(url, cacheKey, timeoutMs = 10000) {
   }
 }
 
-function number(value, fallback = 0) {
+function number(value, fallback = null) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function average(values) {
-  if (!Array.isArray(values) || !values.length) return 0;
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
+  if (!Array.isArray(values) || !values.length) return null;
+  const valid = values.filter((value) => Number.isFinite(value));
+  if (!valid.length) return null;
+  return valid.reduce((sum, value) => sum + value, 0) / valid.length;
 }
 
 function clamp(value, min, max) {
+  if (!Number.isFinite(value)) return min;
   return Math.min(max, Math.max(min, value));
 }
 
@@ -311,6 +279,8 @@ function calculateAtrPercent(klines, period) {
     const high = number(klines[i][2]);
     const low = number(klines[i][3]);
 
+    if (!Number.isFinite(prevClose) || !Number.isFinite(high) || !Number.isFinite(low)) continue;
+
     const trueRange = Math.max(
       high - low,
       Math.abs(high - prevClose),
@@ -324,7 +294,7 @@ function calculateAtrPercent(klines, period) {
   const atr = average(relevant);
   const currentClose = number(klines[klines.length - 1][4]);
 
-  if (!currentClose) return null;
+  if (!Number.isFinite(atr) || !Number.isFinite(currentClose) || currentClose <= 0) return null;
   return (atr / currentClose) * 100;
 }
 
@@ -368,12 +338,14 @@ function getSlice(klines, days) {
 }
 
 function calculateRangePosition(price, high, low) {
-  if (high <= low) return 50;
+  if (!Number.isFinite(price) || !Number.isFinite(high) || !Number.isFinite(low) || high <= low) {
+    return null;
+  }
   return clamp(((price - low) / (high - low)) * 100, 0, 100);
 }
 
 function calculateVolumeRatio(klines) {
-  if (!Array.isArray(klines) || klines.length < 31) return 1;
+  if (!Array.isArray(klines) || klines.length < 31) return null;
 
   const recent = klines.slice(-7).map((kline) => number(kline[7]));
   const baseline = klines.slice(-30, -7).map((kline) => number(kline[7]));
@@ -381,7 +353,7 @@ function calculateVolumeRatio(klines) {
   const recentAvg = average(recent);
   const baselineAvg = average(baseline);
 
-  if (!baselineAvg) return 1;
+  if (!Number.isFinite(recentAvg) || !Number.isFinite(baselineAvg) || baselineAvg <= 0) return null;
   return recentAvg / baselineAvg;
 }
 
@@ -711,13 +683,13 @@ function calculateBtcCapitalFlow24hUsd(ticker) {
   const currentPrice = number(ticker?.lastPrice);
   const changePct = number(ticker?.priceChangePercent);
 
-  if (!currentPrice || !Number.isFinite(changePct) || changePct <= -99.9) {
-    return 0;
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0 || !Number.isFinite(changePct) || changePct <= -99.9) {
+    return null;
   }
 
   const previousPrice = currentPrice / (1 + changePct / 100);
-  if (!previousPrice || !Number.isFinite(previousPrice)) {
-    return 0;
+  if (!Number.isFinite(previousPrice) || previousPrice <= 0) {
+    return null;
   }
 
   const currentMarketCap = currentPrice * BTC_CIRCULATING_SUPPLY;
@@ -1279,8 +1251,10 @@ function buildDashboardMarketStructure(metrics) {
 function buildDashboardFinalSignal(metrics) {
   const structure = buildDashboardMarketStructure(metrics);
   const fearGreedValue = safeNumber(metrics.fearGreed?.value, 50);
-  const rangePos30 = calculateRangePosition(metrics.price, metrics.high30d, metrics.low30d);
-  const rangePos90 = calculateRangePosition(metrics.price, metrics.high90d, metrics.low90d);
+  const rawRangePos30 = calculateRangePosition(metrics.price, metrics.high30d, metrics.low30d);
+  const rawRangePos90 = calculateRangePosition(metrics.price, metrics.high90d, metrics.low90d);
+  const rangePos30 = Number.isFinite(rawRangePos30) ? rawRangePos30 : 50;
+  const rangePos90 = Number.isFinite(rawRangePos90) ? rawRangePos90 : 50;
   const perf30d = safeNumber(metrics.perf30d, 0);
   const change24h = safeNumber(metrics.change24h, 0);
   const volRatio = safeNumber(metrics.volRatio, 1);
@@ -1720,7 +1694,15 @@ function getValueContext(currentZone) {
     return { label: "Neutral", color: "#f5b942" };
 }
 function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, currentZone, perf30d, perf90d) {
-    const range = Math.max(1, yearlyHigh - yearlyLow);
+    if (![price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, perf30d, perf90d].every(Number.isFinite) || yearlyHigh <= yearlyLow || price <= 0) {
+        return {
+            phase: "Consolidation",
+            confidence: "Low",
+            desc: "The model is waiting for enough valid cycle data before assigning a stronger macro phase.",
+            scoreGap: 0,
+        };
+    }
+    const range = yearlyHigh - yearlyLow;
     const position = (price - yearlyLow) / range;
     const distanceFromHighPct = yearlyHigh > 0 ? ((yearlyHigh - price) / yearlyHigh) * 100 : 0;
     const maDiffPct = ma200w > 0 ? ((price - ma200w) / ma200w) * 100 : 0;
@@ -1908,8 +1890,8 @@ function getPhaseStage(phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf
 function getPhaseReasoning(price, yearlyHigh, ma200w, currentZone, perf30d, perf90d, yearlyLow, drawdown) {
     const fromHighPct = yearlyHigh > 0 ? ((yearlyHigh - price) / yearlyHigh) * 100 : 0;
     const maRatio = ma200w > 0 ? ((price - ma200w) / ma200w) * 100 : 0;
-    const range = Math.max(1, yearlyHigh - yearlyLow);
-    const rangePosition = ((price - yearlyLow) / range) * 100;
+    const range = Number.isFinite(yearlyHigh) && Number.isFinite(yearlyLow) && yearlyHigh > yearlyLow ? yearlyHigh - yearlyLow : null;
+    const rangePosition = range && Number.isFinite(price) ? ((price - yearlyLow) / range) * 100 : null;
     const valueContext = getValueContext(currentZone);
     return [
         {
@@ -1919,7 +1901,7 @@ function getPhaseReasoning(price, yearlyHigh, ma200w, currentZone, perf30d, perf
         },
         {
             label: "Range Position",
-            value: `${clamp(rangePosition, 0, 100).toFixed(1)}%`,
+            value: Number.isFinite(rangePosition) ? `${clamp(rangePosition, 0, 100).toFixed(1)}%` : "—",
             color: "#f5b942",
         },
         {
@@ -2162,8 +2144,8 @@ function buildMarketCyclePayload(data) {
   const premiumUpper = number(data?.premiumUpper, null);
   const safeZoneUpper = number(data?.safeZoneUpper, null);
   const strongValueUpper = number(data?.strongValueUpper, null);
-  const perf30d = number(data?.perf30d, 0);
-  const perf90d = number(data?.perf90d, 0);
+  const perf30d = number(data?.perf30d, null);
+  const perf90d = number(data?.perf90d, null);
 
   if (
     !Number.isFinite(price) ||
@@ -2173,7 +2155,9 @@ function buildMarketCyclePayload(data) {
     !Number.isFinite(deepValueUpper) ||
     !Number.isFinite(accumulationUpper) ||
     !Number.isFinite(fairValueUpper) ||
-    !Number.isFinite(premiumUpper)
+    !Number.isFinite(premiumUpper) ||
+    !Number.isFinite(perf30d) ||
+    !Number.isFinite(perf90d)
   ) {
     return {
       currentZone: "—",
@@ -2607,15 +2591,19 @@ function getWyckoffEngine(perf7d, perf30d, perf90d, rangePos30, rangePos90, atr1
 }
 
 function getFlowReasoning(upsideDistance, downsideDistance, pressureLabel, trapLong, trapShort, wyckoff, atr14Pct, rangePos30) {
+  const upsideValue = Number.isFinite(upsideDistance) ? `${upsideDistance.toFixed(2)}%` : "—";
+  const downsideValue = Number.isFinite(downsideDistance) ? `${downsideDistance.toFixed(2)}%` : "—";
+  const rangeValue = Number.isFinite(rangePos30) ? `${clamp(rangePos30, 0, 100).toFixed(1)}%` : "—";
+
   return [
-    { label: "Nearest Upside Liquidity", value: `${upsideDistance.toFixed(2)}%`, color: "#ff5c5c" },
-    { label: "Nearest Downside Liquidity", value: `${downsideDistance.toFixed(2)}%`, color: "#00d09c" },
-    { label: "Pressure Regime", value: pressureLabel, color: ofBadgeColor(pressureLabel) },
-    { label: "Long Trap Pressure", value: trapLong, color: ofBadgeColor(trapLong) },
-    { label: "Short Trap Pressure", value: trapShort, color: ofBadgeColor(trapShort) },
-    { label: "Wyckoff State", value: wyckoff, color: ofBadgeColor(wyckoff) },
-    { label: "Short-Term Volatility", value: ofFormatPercent(atr14Pct), color: atr14Pct > 3 ? "#ff5c5c" : "#00d09c" },
-    { label: "30D Range Position", value: `${clamp(rangePos30, 0, 100).toFixed(1)}%`, color: "#f5b942" },
+    { label: "Nearest Upside Liquidity", value: upsideValue, color: "#ff5c5c" },
+    { label: "Nearest Downside Liquidity", value: downsideValue, color: "#00d09c" },
+    { label: "Pressure Regime", value: pressureLabel || "Mixed", color: ofBadgeColor(pressureLabel || "Mixed") },
+    { label: "Long Trap Pressure", value: trapLong || "Medium", color: ofBadgeColor(trapLong || "Medium") },
+    { label: "Short Trap Pressure", value: trapShort || "Medium", color: ofBadgeColor(trapShort || "Medium") },
+    { label: "Wyckoff State", value: wyckoff || "Neutral", color: ofBadgeColor(wyckoff || "Neutral") },
+    { label: "Short-Term Volatility", value: ofFormatPercent(atr14Pct), color: Number.isFinite(atr14Pct) && atr14Pct > 3 ? "#ff5c5c" : "#f5b942" },
+    { label: "30D Range Position", value: rangeValue, color: "#f5b942" },
   ];
 }
 
@@ -2634,11 +2622,61 @@ function getMarketLink(pressureLabel, wyckoffPhase) {
 }
 
 function buildOrderFlowModel(metrics) {
+  const hasCoreData = [
+    metrics.price,
+    metrics.high7d,
+    metrics.low7d,
+    metrics.high30d,
+    metrics.low30d,
+    metrics.nearTermHigh,
+    metrics.nearTermLow,
+    metrics.atr14Pct,
+    metrics.rangePos30,
+  ].every((value) => Number.isFinite(value));
+
+  if (!hasCoreData) {
+    const pressure = {
+      label: "Mixed",
+      score: null,
+      note: "Order-flow data is incomplete right now, so this layer is intentionally not forcing a signal.",
+    };
+    const traps = {
+      longTrap: "Medium",
+      shortTrap: "Medium",
+      note: "Trap pressure cannot be confirmed until enough fresh structure data is available.",
+    };
+    const wyckoff = {
+      phase: "Neutral",
+      confidence: "Low",
+      note: "Wyckoff state is unavailable until enough valid order-flow inputs are present.",
+    };
+    const reasoning = getFlowReasoning(null, null, pressure.label, traps.longTrap, traps.shortTrap, wyckoff.phase, null, null);
+    const interpretation = getFlowInterpretation(pressure.label, wyckoff.phase, traps.longTrap, traps.shortTrap);
+    const marketLink = getMarketLink(pressure.label, wyckoff.phase);
+
+    return {
+      ladder: {
+        above: [],
+        below: [],
+        structureLabel: "Balanced",
+        structureNote: "Liquidity data is incomplete, so nearby route context is limited right now.",
+        bias: "Mixed",
+        reactionRisk: "Medium",
+      },
+      pressure,
+      traps,
+      wyckoff,
+      reasoning,
+      interpretation,
+      marketLink,
+    };
+  }
+
   const ladder = buildLiquidityLadder(metrics.price, metrics.high7d, metrics.low7d, metrics.high14d, metrics.low14d, metrics.high30d, metrics.low30d, metrics.high90d, metrics.low90d, metrics.nearTermHigh, metrics.nearTermLow, metrics.atr14Pct);
   const pressure = getPressureResult(ladder.above[0]?.distancePct ?? 999, ladder.below[0]?.distancePct ?? 999, metrics.perf7d, metrics.perf30d, metrics.rangePos30);
   const traps = getTrapEngine(metrics.perf7d, metrics.perf30d, metrics.rangePos30, metrics.shortVolatilityPct);
   const wyckoff = getWyckoffEngine(metrics.perf7d, metrics.perf30d, metrics.perf90d, metrics.rangePos30, metrics.rangePos90, metrics.atr14Pct, metrics.atr30Pct);
-  const reasoning = getFlowReasoning(ladder.above[0]?.distancePct ?? 0, ladder.below[0]?.distancePct ?? 0, pressure.label, traps.longTrap, traps.shortTrap, wyckoff.phase, metrics.atr14Pct, metrics.rangePos30);
+  const reasoning = getFlowReasoning(ladder.above[0]?.distancePct, ladder.below[0]?.distancePct, pressure.label, traps.longTrap, traps.shortTrap, wyckoff.phase, metrics.atr14Pct, metrics.rangePos30);
   const interpretation = getFlowInterpretation(pressure.label, wyckoff.phase, traps.longTrap, traps.shortTrap);
   const marketLink = getMarketLink(pressure.label, wyckoff.phase);
   return { ladder, pressure, traps, wyckoff, reasoning, interpretation, marketLink };
@@ -2731,14 +2769,14 @@ async function getOrderFlowPayload() {
     low90d,
     nearTermHigh,
     nearTermLow,
-    atr14Pct: atr14Pct ?? 0,
-    atr30Pct: atr30Pct ?? atr14Pct ?? 0,
-    perf7d: perf7d ?? 0,
-    perf30d: perf30d ?? 0,
-    perf90d: perf90d ?? 0,
-    rangePos30: rangePos30 ?? 50,
-    rangePos90: rangePos90 ?? 50,
-    shortVolatilityPct: shortVolatilityPct ?? 0,
+    atr14Pct,
+    atr30Pct,
+    perf7d,
+    perf30d,
+    perf90d,
+    rangePos30,
+    rangePos90,
+    shortVolatilityPct,
   });
 
   return {
@@ -3502,92 +3540,12 @@ const dataHealth = getDataHealth([
   };
 }
 
-
-async function warmSnapshot(key, ttlMs, loader) {
-  try {
-    await withCache(key, ttlMs, loader, { allowStaleOnError: true });
-    return { key, ok: true };
-  } catch (error) {
-    console.warn(`Snapshot warmup failed for ${key}:`, error.message);
-    return { key, ok: false, error: error.message };
-  }
-}
-
-async function warmCoreSnapshots() {
-  SNAPSHOT_RUNTIME.lastWarmupAt = new Date().toISOString();
-  SNAPSHOT_RUNTIME.warmupCount += 1;
-
-  const results = await Promise.all([
-    warmSnapshot("dashboard", DASHBOARD_TTL, getDashboardPayload),
-    warmSnapshot("market-data", MARKET_DATA_TTL, getMarketDataPayload),
-    warmSnapshot("order-flow", ORDER_FLOW_TTL, getOrderFlowPayload),
-    warmSnapshot("market-advanced", MARKET_ADVANCED_TTL, getMarketAdvancedPayload),
-    warmSnapshot("intelligence", INTELLIGENCE_TTL, getIntelligencePayload),
-  ]);
-
-  const failed = results.filter((result) => !result.ok);
-
-  if (failed.length) {
-    SNAPSHOT_RUNTIME.lastWarmupError = failed
-      .map((result) => `${result.key}: ${result.error}`)
-      .join(" | ");
-  } else {
-    SNAPSHOT_RUNTIME.lastWarmupOkAt = new Date().toISOString();
-    SNAPSHOT_RUNTIME.lastWarmupError = null;
-  }
-
-  return results;
-}
-
-function buildBackendHealth() {
-  return {
-    ok: true,
-    time: new Date().toISOString(),
-    runtime: SNAPSHOT_RUNTIME,
-    cache: {
-      dashboard: getCacheMeta("dashboard"),
-      marketData: getCacheMeta("market-data"),
-      orderFlow: getCacheMeta("order-flow"),
-      marketAdvanced: getCacheMeta("market-advanced"),
-      intelligence: getCacheMeta("intelligence"),
-      binanceTicker: getCacheMeta("binance_ticker_24h"),
-      dailyKlines120: getCacheMeta("binance_klines_1d_120"),
-      dailyKlines400: getCacheMeta("binance_klines_1d_400"),
-      h4Klines180: getCacheMeta("binance_klines_4h_180"),
-      weeklyKlines260: getCacheMeta("binance_klines_1w_260"),
-      trades1000: getCacheMeta("binance_trades_1000"),
-      coingecko: getCacheMeta("coingecko_global"),
-      fearGreed: getCacheMeta("fear_greed"),
-    },
-    inflight: Array.from(INFLIGHT.keys()),
-    lastGoodTicker: {
-      available: Boolean(LAST_GOOD_TICKER),
-      lastPrice: LAST_GOOD_TICKER?.lastPrice ?? null,
-    },
-    intelligenceState: {
-      stableBias: INTELLIGENCE_STATE.stableBias,
-      stableBiasConfidence: INTELLIGENCE_STATE.stableBiasConfidence,
-      stableAttractiveness: INTELLIGENCE_STATE.stableAttractiveness,
-      pendingBias: INTELLIGENCE_STATE.pendingBias,
-      pendingBiasCount: INTELLIGENCE_STATE.pendingBiasCount,
-      bootstrapped: INTELLIGENCE_STATE.bootstrapped,
-      lastBiasCommitAt: INTELLIGENCE_STATE.lastBiasCommitAt
-        ? new Date(INTELLIGENCE_STATE.lastBiasCommitAt).toISOString()
-        : null,
-      lastAttractivenessCommitAt: INTELLIGENCE_STATE.lastAttractivenessCommitAt
-        ? new Date(INTELLIGENCE_STATE.lastAttractivenessCommitAt).toISOString()
-        : null,
-    },
-  };
-}
-
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
     name: "Revelix Backend",
     endpoints: [
       "/health",
-      "/api/health",
       "/api/dashboard",
       "/api/market-data",
       "/api/order-flow",
@@ -3597,28 +3555,6 @@ app.get("/", (_req, res) => {
       "/api/push/unregister",
     ],
   });
-});
-
-app.get("/health", async (_req, res) => {
-  let tokenCount = 0;
-
-  if (supabase) {
-    const { count } = await supabase
-      .from("push_tokens")
-      .select("*", { count: "exact", head: true });
-
-    tokenCount = count || 0;
-  }
-
-  res.json({
-    ok: true,
-    time: new Date().toISOString(),
-    pushTokens: tokenCount,
-  });
-});
-
-app.get("/api/health", (_req, res) => {
-  res.json(buildBackendHealth());
 });
 
 app.post("/api/push/register", async (req, res) => {
@@ -3807,12 +3743,82 @@ app.get("/api/debug/binance", async (_req, res) => {
   }
 });
 
+async function getHealthPayload() {
+  const now = Date.now();
+  const cacheKeys = [
+    "dashboard",
+    "market-data",
+    "order-flow",
+    "market-advanced",
+    "intelligence",
+    "binance_ticker_24h",
+    "coingecko_global",
+    "fear_greed",
+  ];
+
+  const cache = {};
+  cacheKeys.forEach((key) => {
+    const entry = CACHE.get(key);
+    cache[key] = entry
+      ? {
+          present: true,
+          stale: now > entry.expiresAt,
+          expiresInMs: Math.max(0, entry.expiresAt - now),
+        }
+      : { present: false, stale: true, expiresInMs: null };
+  });
+
+  return {
+    ok: true,
+    checkedAt: new Date().toISOString(),
+    cache,
+    inflight: Array.from(INFLIGHT.keys()),
+    lastGoodTicker: LAST_GOOD_TICKER
+      ? {
+          lastPrice: LAST_GOOD_TICKER.lastPrice ?? null,
+          priceChangePercent: LAST_GOOD_TICKER.priceChangePercent ?? null,
+        }
+      : null,
+    intelligenceState: {
+      stableBias: INTELLIGENCE_STATE.stableBias,
+      stableBiasConfidence: INTELLIGENCE_STATE.stableBiasConfidence,
+      stableAttractiveness: INTELLIGENCE_STATE.stableAttractiveness,
+      pendingBias: INTELLIGENCE_STATE.pendingBias,
+      pendingBiasCount: INTELLIGENCE_STATE.pendingBiasCount,
+      bootstrapped: INTELLIGENCE_STATE.bootstrapped,
+      lastBiasEvaluationAt: INTELLIGENCE_STATE.lastBiasEvaluationAt
+        ? new Date(INTELLIGENCE_STATE.lastBiasEvaluationAt).toISOString()
+        : null,
+      lastBiasCommitAt: INTELLIGENCE_STATE.lastBiasCommitAt
+        ? new Date(INTELLIGENCE_STATE.lastBiasCommitAt).toISOString()
+        : null,
+    },
+  };
+}
+
+
+app.get("/api/health", async (_req, res) => {
+  res.json(await getHealthPayload());
+});
+
+async function warmCoreSnapshots() {
+  try {
+    await Promise.allSettled([
+      withCache("dashboard", DASHBOARD_TTL, getDashboardPayload, { allowStaleOnError: true }),
+      withCache("market-data", MARKET_DATA_TTL, getMarketDataPayload, { allowStaleOnError: true }),
+      withCache("order-flow", ORDER_FLOW_TTL, getOrderFlowPayload, { allowStaleOnError: true }),
+      withCache("market-advanced", MARKET_ADVANCED_TTL, getMarketAdvancedPayload, { allowStaleOnError: true }),
+      withCache("intelligence", INTELLIGENCE_TTL, getIntelligencePayload, { allowStaleOnError: true }),
+    ]);
+  } catch (error) {
+    console.warn("Snapshot warmup failed:", error.message);
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Revelix backend is running on port ${PORT}`);
 
-  setTimeout(() => {
-    warmCoreSnapshots();
-  }, 5 * 1000);
+  warmCoreSnapshots();
 
   setInterval(() => {
     warmCoreSnapshots();
