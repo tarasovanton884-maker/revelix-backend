@@ -1425,6 +1425,629 @@ function buildDashboardMarketClarity(signal) {
 }
 
 
+
+// Market screen logic moved from frontend. Keep this backend-driven.
+function formatMoney(value) {
+    if (!Number.isFinite(value))
+        return "—";
+    return `$${Math.round(value).toLocaleString("en-US")}`;
+}
+function formatPercent(value) {
+    if (!Number.isFinite(value))
+        return "—";
+    return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+function getPercentColor(value) {
+    if (value > 0)
+        return "#00d09c";
+    if (value < 0)
+        return "#ff5c5c";
+    return "#f5b942";
+}
+function getBadgeColor(label) {
+    const green = [
+        "Macro Bottom",
+        "Deep Value Zone",
+        "Accumulation Zone",
+        "Strong Recovery",
+        "Improving",
+        "Aggressive Accumulation",
+        "Selective Accumulation",
+        "Early Expansion Positioning",
+        "Established Bottom",
+        "Safe Accumulation",
+        "Strong Value",
+        "Value-Rich",
+        "High",
+    ];
+    const red = [
+        "Peak",
+        "Overheated Zone",
+        "Reduce Risk",
+        "No Recovery",
+        "Distribution",
+        "Extreme Value",
+        "Panic Value",
+        "Defensive",
+        "Late Expansion",
+    ];
+    const amber = [
+        "First Sell-Off",
+        "Consolidation",
+        "Second Sell-Off",
+        "Premium Zone",
+        "Fair Value Zone",
+        "Neutral",
+        "Unclear",
+        "Early Recovery",
+        "Early Positioning",
+        "Wait & Observe",
+        "Measured Caution",
+        "Range Formation",
+        "Pre-Break Move",
+        "Initial Breakdown",
+        "Continuation",
+        "Early Capitulation",
+        "Low",
+        "Medium",
+        "Low–Moderate",
+        "Patient",
+        "Selective",
+        "Balanced",
+        "Expensive",
+    ];
+    if (green.includes(label))
+        return "#00d09c";
+    if (red.includes(label))
+        return "#ff5c5c";
+    if (amber.includes(label))
+        return "#f5b942";
+    return "#f5b942";
+}
+function getCurrentZone(price, deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper) {
+    if (price <= deepValueUpper)
+        return "Deep Value Zone";
+    if (price <= accumulationUpper)
+        return "Accumulation Zone";
+    if (price <= fairValueUpper)
+        return "Fair Value Zone";
+    if (price <= premiumUpper)
+        return "Premium Zone";
+    return "Overheated Zone";
+}
+function getValueContext(currentZone) {
+    if (currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone") {
+        return { label: "Value-Rich", color: "#00d09c" };
+    }
+    if (currentZone === "Premium Zone" || currentZone === "Overheated Zone") {
+        return { label: "Expensive", color: "#ff5c5c" };
+    }
+    return { label: "Neutral", color: "#f5b942" };
+}
+function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, currentZone, perf30d, perf90d) {
+    const range = Math.max(1, yearlyHigh - yearlyLow);
+    const position = (price - yearlyLow) / range;
+    const distanceFromHighPct = yearlyHigh > 0 ? ((yearlyHigh - price) / yearlyHigh) * 100 : 0;
+    const maDiffPct = ma200w > 0 ? ((price - ma200w) / ma200w) * 100 : 0;
+    const athDrawdownAbs = Math.abs(drawdown);
+    let peakScore = 0;
+    let firstSellScore = 0;
+    let consolidationScore = 0;
+    let secondSellScore = 0;
+    let macroBottomScore = 0;
+    peakScore += position >= 0.90 ? 4 : position >= 0.82 ? 2.5 : 0;
+    peakScore += currentZone === "Premium Zone" ? 2 : 0;
+    peakScore += currentZone === "Overheated Zone" ? 3 : 0;
+    peakScore += distanceFromHighPct <= 5 ? 2.5 : distanceFromHighPct <= 10 ? 1.2 : 0;
+    peakScore += athDrawdownAbs <= 15 ? 2 : athDrawdownAbs <= 22 ? 1 : 0;
+    peakScore += perf30d > 6 ? 1.5 : perf30d > 0 ? 0.8 : 0;
+    peakScore += perf90d > 12 ? 1 : 0;
+    peakScore += maDiffPct > 18 ? 1 : 0;
+    firstSellScore += athDrawdownAbs >= 20 && athDrawdownAbs <= 38 ? 3 : 0;
+    firstSellScore += distanceFromHighPct >= 8 && distanceFromHighPct <= 24 ? 1.5 : 0;
+    firstSellScore += position >= 0.50 && position <= 0.78 ? 1.8 : 0;
+    firstSellScore += perf30d <= 0 && perf30d > -12 ? 2 : 0;
+    firstSellScore += perf90d > -15 ? 0.8 : 0;
+    firstSellScore +=
+        currentZone === "Fair Value Zone" || currentZone === "Premium Zone" ? 1.2 : 0;
+    firstSellScore += maDiffPct > 0 ? 0.8 : 0;
+    consolidationScore += athDrawdownAbs >= 15 && athDrawdownAbs <= 35 ? 1.3 : 0;
+    consolidationScore += position >= 0.35 && position <= 0.65 ? 2.2 : 0;
+    consolidationScore += Math.abs(perf30d) < 8 ? 2.2 : 0;
+    consolidationScore += Math.abs(perf90d) < 18 ? 1.5 : 0;
+    consolidationScore +=
+        currentZone === "Fair Value Zone" || currentZone === "Accumulation Zone" ? 1.2 : 0;
+    consolidationScore += distanceFromHighPct >= 12 && distanceFromHighPct <= 30 ? 1 : 0;
+    consolidationScore += Math.abs(maDiffPct) <= 10 ? 1 : 0;
+    secondSellScore += athDrawdownAbs >= 40 ? 2.4 : athDrawdownAbs >= 32 ? 1.2 : 0;
+    secondSellScore += position < 0.42 ? 2.2 : position < 0.50 ? 1.1 : 0;
+    secondSellScore += perf30d < -4 ? 2.4 : perf30d < 0 ? 1 : 0;
+    secondSellScore += perf90d <= 0 ? 1.4 : 0;
+    secondSellScore += distanceFromHighPct > 20 ? 1.8 : 0;
+    secondSellScore +=
+        currentZone === "Fair Value Zone" || currentZone === "Accumulation Zone" ? 1.5 : 0;
+    secondSellScore += maDiffPct >= -8 && maDiffPct <= 10 ? 1 : 0;
+    macroBottomScore += athDrawdownAbs >= 65 ? 4.2 : athDrawdownAbs >= 58 ? 2.2 : 0;
+    macroBottomScore += currentZone === "Deep Value Zone" ? 2.4 : 0;
+    macroBottomScore += currentZone === "Accumulation Zone" ? 0.8 : 0;
+    macroBottomScore += distanceFromHighPct > 40 ? 1.8 : distanceFromHighPct > 32 ? 1 : 0;
+    macroBottomScore += Math.abs(maDiffPct) <= 8 ? 2.2 : Math.abs(maDiffPct) <= 12 ? 1 : 0;
+    macroBottomScore += position < 0.20 ? 1.6 : position < 0.28 ? 0.8 : 0;
+    macroBottomScore += perf90d < 5 ? 1.1 : 0;
+    macroBottomScore += perf30d > -6 && perf30d < 4 ? 1 : 0;
+    if (athDrawdownAbs < 55) {
+        macroBottomScore -= 2.4;
+    }
+    if (perf30d < -10) {
+        macroBottomScore -= 1.2;
+    }
+    if (maDiffPct > 10) {
+        macroBottomScore -= 0.9;
+    }
+    if (athDrawdownAbs > 55) {
+        consolidationScore -= 1.2;
+        firstSellScore -= 0.8;
+    }
+    if (athDrawdownAbs < 25) {
+        secondSellScore -= 0.8;
+        macroBottomScore -= 0.6;
+    }
+    if (distanceFromHighPct > 12) {
+        peakScore -= 1.2;
+    }
+    if (perf30d < -12 || perf30d > 12) {
+        consolidationScore -= 1;
+    }
+    const scored = [
+        {
+            phase: "Peak",
+            score: peakScore,
+            desc: "The model suggests BTC is in a late-cycle area where upside may still extend, but distribution risk becomes more relevant.",
+        },
+        {
+            phase: "First Sell-Off",
+            score: firstSellScore,
+            desc: "The model suggests BTC has corrected from higher levels and is likely going through an initial post-peak sell-off phase.",
+        },
+        {
+            phase: "Consolidation",
+            score: consolidationScore,
+            desc: "The model suggests BTC is currently stabilizing in a transition range without a clearly dominant macro direction yet.",
+        },
+        {
+            phase: "Second Sell-Off",
+            score: secondSellScore,
+            desc: "The model suggests BTC may be in a deeper corrective leg after consolidation, where downside pressure can still dominate before a full bottom is formed.",
+        },
+        {
+            phase: "Macro Bottom",
+            score: macroBottomScore,
+            desc: "The model suggests BTC is trading in a historically stronger long-term value area, but this should be read as bottoming territory rather than a guaranteed exact final low.",
+        },
+    ].sort((a, b) => b.score - a.score);
+    const best = scored[0];
+    const second = scored[1];
+    const gap = best.score - second.score;
+    let confidence = "Low";
+    if (gap >= 3.2)
+        confidence = "High";
+    else if (gap >= 1.5)
+        confidence = "Medium";
+    return {
+        phase: best.phase,
+        confidence,
+        desc: best.desc,
+        scoreGap: gap,
+    };
+}
+function getRecoveryStatus(price, ma200w, perf30d, perf90d) {
+    const maDiff = ma200w > 0 ? ((price - ma200w) / ma200w) * 100 : 0;
+    if (perf30d <= -6 && perf90d <= -4) {
+        return {
+            label: "No Recovery",
+            note: "Momentum still does not show meaningful recovery evidence across the key horizons.",
+        };
+    }
+    if (perf30d > 0 && perf90d <= 0 && maDiff <= 3) {
+        return {
+            label: "Early Recovery",
+            note: "Shorter-term momentum is improving first, but the broader recovery is not yet fully confirmed.",
+        };
+    }
+    if (perf30d > 6 && perf90d > 12 && maDiff > 5) {
+        return {
+            label: "Strong Recovery",
+            note: "Multiple momentum horizons and structure are aligned positively, which supports a stronger recovery interpretation.",
+        };
+    }
+    if (perf30d > 0 && perf90d > 0 && maDiff > 0) {
+        return {
+            label: "Improving",
+            note: "Momentum and structure are improving together, which strengthens the case for a broader recovery attempt.",
+        };
+    }
+    return {
+        label: "Unclear",
+        note: "Recovery evidence is mixed and not yet strong enough for a higher-conviction interpretation.",
+    };
+}
+function getPhaseStage(phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d) {
+    const fromHigh = yearlyHigh > 0 ? (yearlyHigh - price) / yearlyHigh : 0;
+    const maRatio = ma200w > 0 ? price / ma200w : 1;
+    const ddAbs = Math.abs(drawdown);
+    if (phase === "Macro Bottom") {
+        if (ddAbs < 70 || perf30d < -8 || maRatio < 0.95) {
+            return "Early Bottoming";
+        }
+        return "Established Bottom";
+    }
+    if (phase === "Second Sell-Off") {
+        if (perf30d < -10 && fromHigh > 0.35) {
+            return "Late Capitulation";
+        }
+        if (perf30d > -4 && maRatio >= 0.95) {
+            return "Selling Pressure Easing";
+        }
+        return "Early Capitulation";
+    }
+    if (phase === "Consolidation") {
+        if (Math.abs(perf30d) < 3) {
+            return "Range Formation";
+        }
+        return "Pre-Break Move";
+    }
+    if (phase === "First Sell-Off") {
+        if (perf30d < -8 || ddAbs > 35) {
+            return "Continuation";
+        }
+        return "Initial Breakdown";
+    }
+    if (phase === "Peak") {
+        if (perf30d < 0) {
+            return "Distribution";
+        }
+        return "Early Peak";
+    }
+    return "Neutral";
+}
+function getPhaseReasoning(price, yearlyHigh, ma200w, currentZone, perf30d, perf90d, yearlyLow, drawdown) {
+    const fromHighPct = yearlyHigh > 0 ? ((yearlyHigh - price) / yearlyHigh) * 100 : 0;
+    const maRatio = ma200w > 0 ? ((price - ma200w) / ma200w) * 100 : 0;
+    const range = Math.max(1, yearlyHigh - yearlyLow);
+    const rangePosition = ((price - yearlyLow) / range) * 100;
+    const valueContext = getValueContext(currentZone);
+    return [
+        {
+            label: "Drawdown From ATH",
+            value: formatPercent(drawdown),
+            color: drawdown <= -60 ? "#ff5c5c" : drawdown <= -35 ? "#f5b942" : "#00d09c",
+        },
+        {
+            label: "Range Position",
+            value: `${clamp(rangePosition, 0, 100).toFixed(1)}%`,
+            color: "#f5b942",
+        },
+        {
+            label: "From 52W High",
+            value: `-${Math.abs(fromHighPct).toFixed(1)}%`,
+            color: "#ff5c5c",
+        },
+        {
+            label: "Vs 200W MA",
+            value: formatPercent(maRatio),
+            color: getPercentColor(maRatio),
+        },
+        {
+            label: "Macro Value Context",
+            value: valueContext.label,
+            color: valueContext.color,
+        },
+        {
+            label: "30D Momentum",
+            value: formatPercent(perf30d),
+            color: getPercentColor(perf30d),
+        },
+        {
+            label: "90D Momentum",
+            value: formatPercent(perf90d),
+            color: getPercentColor(perf90d),
+        },
+    ];
+}
+function getPhasePath(phase) {
+    if (phase === "Peak") {
+        return {
+            previous: "Late Expansion",
+            current: "Peak",
+            next: "First Sell-Off",
+        };
+    }
+    if (phase === "First Sell-Off") {
+        return {
+            previous: "Peak",
+            current: "First Sell-Off",
+            next: "Consolidation",
+        };
+    }
+    if (phase === "Consolidation") {
+        return {
+            previous: "First Sell-Off",
+            current: "Consolidation",
+            next: "Second Sell-Off or Macro Bottom",
+        };
+    }
+    if (phase === "Second Sell-Off") {
+        return {
+            previous: "Consolidation",
+            current: "Second Sell-Off",
+            next: "Macro Bottom",
+        };
+    }
+    return {
+        previous: "Second Sell-Off",
+        current: "Macro Bottom",
+        next: "Post-Bottom Recovery Attempt",
+    };
+}
+function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, strongValueUpper) {
+    const riskLevelPrice = Math.min(ma200w * 0.98, safeZoneUpper * 0.99);
+    const recoveryTriggerPrice = ma200w > 0 ? ma200w * 1.08 : price * 1.05;
+    if (phase === "Second Sell-Off") {
+        return {
+            baseProbability: "55%",
+            baseScenario: "BTC may still move lower or remain unstable before a more durable macro bottom and recovery attempt can develop.",
+            altProbability: "30%",
+            altScenario: "Selling pressure may fade earlier than expected, allowing the market to transition into accumulation sooner.",
+            riskTrigger: `Below ${formatMoney(strongValueUpper)}`,
+            recoveryTrigger: `Back above ${formatMoney(recoveryTriggerPrice)}`,
+        };
+    }
+    if (phase === "Macro Bottom") {
+        return {
+            baseProbability: "60%",
+            baseScenario: "BTC may spend time building a macro bottom through accumulation before a new expansion phase starts.",
+            altProbability: "25%",
+            altScenario: "Instead of immediate recovery, BTC may remain range-bound for longer while bottom-building continues.",
+            riskTrigger: `Clean loss of ${formatMoney(riskLevelPrice)}`,
+            recoveryTrigger: `Sustained strength above ${formatMoney(recoveryTriggerPrice)}`,
+        };
+    }
+    if (phase === "Peak") {
+        return {
+            baseProbability: "58%",
+            baseScenario: "BTC is more vulnerable to distribution and a broader corrective phase than to easy continuation from here.",
+            altProbability: "27%",
+            altScenario: "Momentum may stay stronger for longer before the larger correction begins.",
+            riskTrigger: "Failed upside continuation",
+            recoveryTrigger: `Hold above ${formatMoney(recoveryTriggerPrice)}`,
+        };
+    }
+    if (phase === "Consolidation") {
+        return {
+            baseProbability: "50%",
+            baseScenario: "BTC is likely building a transition range before choosing either renewed weakness or more constructive recovery.",
+            altProbability: "30%",
+            altScenario: currentZone === "Accumulation Zone"
+                ? "If support continues to hold, consolidation may resolve into re-accumulation."
+                : "If buyers strengthen, consolidation may resolve upward rather than into another sell-off leg.",
+            riskTrigger: `Break below ${formatMoney(riskLevelPrice)}`,
+            recoveryTrigger: `Break above ${formatMoney(recoveryTriggerPrice)}`,
+        };
+    }
+    return {
+        baseProbability: "48%",
+        baseScenario: "BTC remains vulnerable to further correction before a clearer consolidation phase can stabilize the structure.",
+        altProbability: "32%",
+        altScenario: "If downside momentum fades, the market may transition sideways before a stronger bottoming attempt develops.",
+        riskTrigger: `Below ${formatMoney(riskLevelPrice)}`,
+        recoveryTrigger: `Back above ${formatMoney(recoveryTriggerPrice)}`,
+    };
+}
+function getInvestorStance(phase, currentZone, recoveryLabel, perf30d) {
+    if (phase === "Macro Bottom") {
+        return {
+            headline: recoveryLabel === "Strong Recovery"
+                ? "Early Expansion Positioning"
+                : "Aggressive Accumulation",
+            aggression: recoveryLabel === "Strong Recovery" ? "High" : "Moderate",
+            deployment: "Gradual but active",
+            strategy: "Scale into strength selectively",
+            riskApproach: "Controlled",
+            note: "Investors typically increase exposure as structure stabilizes near macro value, but still avoid chasing blindly.",
+        };
+    }
+    if (phase === "Second Sell-Off") {
+        return {
+            headline: "Selective Accumulation",
+            aggression: perf30d < -5 ? "Very Low" : "Low",
+            deployment: "Highly selective",
+            strategy: "Wait for stabilization",
+            riskApproach: "Strict discipline",
+            note: "This phase often traps early buyers, so selective entries and patience matter more than aggression.",
+        };
+    }
+    if (phase === "Peak") {
+        return {
+            headline: "Reduce Risk",
+            aggression: "Low",
+            deployment: "Defensive",
+            strategy: "Protect capital",
+            riskApproach: "Reduce exposure",
+            note: "Asymmetry weakens near peaks, so capital protection often matters more than forcing new upside entries.",
+        };
+    }
+    if (phase === "Consolidation") {
+        return {
+            headline: recoveryLabel === "Improving" ? "Early Positioning" : "Wait & Observe",
+            aggression: recoveryLabel === "Improving" ? "Low–Moderate" : "Low",
+            deployment: currentZone === "Accumulation Zone" ? "Selective" : "Patient",
+            strategy: recoveryLabel === "Improving" ? "Build carefully" : "Wait for directional confirmation",
+            riskApproach: "Flexible",
+            note: "Markets often fake direction during consolidation, so patient positioning usually beats emotional conviction.",
+        };
+    }
+    return {
+        headline: "Measured Caution",
+        aggression: "Low",
+        deployment: "Selective",
+        strategy: "Avoid forced entries",
+        riskApproach: "Balanced",
+        note: "Early post-peak structures still require patience because the market can remain vulnerable before deeper value is reached.",
+    };
+}
+function getIntelligenceLink(phase, currentZone) {
+    if (phase === "Macro Bottom" ||
+        currentZone === "Deep Value Zone" ||
+        currentZone === "Accumulation Zone") {
+        return [
+            "Confirm that Risk Level remains constructive.",
+            "Check whether Investor Attractiveness stays strong.",
+            "Watch if Investor Bias starts leaning toward accumulation.",
+        ];
+    }
+    if (phase === "Peak" ||
+        currentZone === "Premium Zone" ||
+        currentZone === "Overheated Zone") {
+        return [
+            "Confirm whether Risk Level is rising.",
+            "Check if Investor Attractiveness is weakening.",
+            "Watch if Investor Bias deteriorates toward distribution.",
+        ];
+    }
+    return [
+        "Use Risk Level to confirm if structure is improving or worsening.",
+        "Use Investor Attractiveness to check if asymmetry is becoming stronger.",
+        "Use Investor Bias to confirm whether participation quality is improving.",
+    ];
+}
+function getSignalInterpretation(phase, recoveryLabel, currentZone) {
+    if (phase === "Macro Bottom") {
+        return {
+            title: "How to read this signal",
+            body: "The model currently leans toward a macro bottoming environment. This does not mean BTC cannot move lower from here. It means the current mix of drawdown, long-term value, structure, and positioning suggests the market is entering an area where macro bottoms tend to form.",
+        };
+    }
+    if (phase === "Second Sell-Off") {
+        return {
+            title: "How to read this signal",
+            body: "The model currently leans toward a second sell-off phase. This does not mean the decline must continue immediately, but it suggests downside pressure still looks more relevant than a confirmed macro bottom or recovery.",
+        };
+    }
+    if (phase === "Peak") {
+        return {
+            title: "How to read this signal",
+            body: "The model currently leans toward a peak or late-cycle environment. This does not mean BTC cannot go higher, but it suggests upside asymmetry is weakening while distribution risk becomes more important.",
+        };
+    }
+    if (phase === "Consolidation") {
+        return {
+            title: "How to read this signal",
+            body: "The model currently leans toward consolidation. This does not mean the market has chosen direction yet. It means current conditions are mixed and the structure still needs stronger confirmation.",
+        };
+    }
+    return {
+        title: "How to read this signal",
+        body: recoveryLabel === "Improving" || recoveryLabel === "Strong Recovery"
+            ? "The model currently sees early improvement developing after deeper weakness. This does not mean a new expansion is already confirmed, but it does mean the balance of evidence is improving."
+            : `The model currently reads the market as ${currentZone.toLowerCase()} with mixed follow-through. This does not mean the current view cannot change quickly if momentum or structure shifts.`,
+    };
+}
+
+
+function buildMarketCyclePayload(data) {
+  const price = number(data?.price, null);
+  const yearlyHigh = number(data?.yearlyHigh, null);
+  const yearlyLow = number(data?.yearlyLow, null);
+  const ath = number(data?.ath, null);
+  const drawdown = number(data?.drawdown, null);
+  const ma200w = number(data?.ma200w, null);
+  const deepValueUpper = number(data?.deepValueUpper, null);
+  const accumulationUpper = number(data?.accumulationUpper, null);
+  const fairValueUpper = number(data?.fairValueUpper, null);
+  const premiumUpper = number(data?.premiumUpper, null);
+  const safeZoneUpper = number(data?.safeZoneUpper, null);
+  const strongValueUpper = number(data?.strongValueUpper, null);
+  const perf30d = number(data?.perf30d, 0);
+  const perf90d = number(data?.perf90d, 0);
+
+  if (
+    !Number.isFinite(price) ||
+    !Number.isFinite(yearlyHigh) ||
+    !Number.isFinite(yearlyLow) ||
+    !Number.isFinite(ma200w) ||
+    !Number.isFinite(deepValueUpper) ||
+    !Number.isFinite(accumulationUpper) ||
+    !Number.isFinite(fairValueUpper) ||
+    !Number.isFinite(premiumUpper)
+  ) {
+    return {
+      currentZone: "—",
+      valueContext: { label: "—", color: "#f5b942" },
+      cyclePhase: { phase: "—", confidence: "—", desc: "Market cycle data is temporarily unavailable.", scoreGap: null },
+      recoveryStatus: { label: "—", note: "Recovery data is temporarily unavailable." },
+      phaseStage: "—",
+      phaseReasoning: [],
+      phasePath: { previous: "—", current: "—", next: "—" },
+      scenario: {
+        baseProbability: "—",
+        baseScenario: "Scenario data is temporarily unavailable.",
+        altProbability: "—",
+        altScenario: "Alternative scenario data is temporarily unavailable.",
+        riskTrigger: "—",
+        recoveryTrigger: "—",
+      },
+      stance: {
+        headline: "—",
+        aggression: "—",
+        deployment: "—",
+        strategy: "—",
+        riskApproach: "—",
+        note: "Investor stance is temporarily unavailable.",
+      },
+      intelligenceLink: [],
+      signalInterpretation: { title: "How to read this signal", body: "Market signal data is temporarily unavailable." },
+      cycleMapPhases: ["Peak", "First Sell-Off", "Consolidation", "Second Sell-Off", "Macro Bottom"],
+    };
+  }
+
+  const currentZone = getCurrentZone(price, deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper);
+  const valueContext = getValueContext(currentZone);
+  const cyclePhase = getCyclePhase(
+    price,
+    yearlyHigh,
+    yearlyLow,
+    ath,
+    drawdown,
+    ma200w,
+    currentZone,
+    perf30d,
+    perf90d
+  );
+  const recoveryStatus = getRecoveryStatus(price, ma200w, perf30d, perf90d);
+  const phaseStage = getPhaseStage(cyclePhase.phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d);
+  const phaseReasoning = getPhaseReasoning(price, yearlyHigh, ma200w, currentZone, perf30d, perf90d, yearlyLow, drawdown);
+  const phasePath = getPhasePath(cyclePhase.phase);
+  const scenario = getScenarioEngine(cyclePhase.phase, currentZone, price, ma200w, safeZoneUpper, strongValueUpper);
+  const stance = getInvestorStance(cyclePhase.phase, currentZone, recoveryStatus.label, perf30d);
+  const intelligenceLink = getIntelligenceLink(cyclePhase.phase, currentZone);
+  const signalInterpretation = getSignalInterpretation(cyclePhase.phase, recoveryStatus.label, currentZone);
+
+  return {
+    currentZone,
+    valueContext,
+    cyclePhase,
+    recoveryStatus,
+    phaseStage,
+    phaseReasoning,
+    phasePath,
+    scenario,
+    stance,
+    intelligenceLink,
+    signalInterpretation,
+    cycleMapPhases: ["Peak", "First Sell-Off", "Consolidation", "Second Sell-Off", "Macro Bottom"],
+  };
+}
+
 async function getDashboardPayload() {
   const [tickerResult, globalDataResult, fearGreedResult] = await Promise.allSettled([
     fetchBinanceTicker24h(),
@@ -1885,10 +2508,32 @@ const dataHealth = getDataHealth([
   const prev180d = getCloseAtOffset(dailyCloses, 180);
   const prev365d = getCloseAtOffset(dailyCloses, 365);
 
+  const marketCycle = buildMarketCyclePayload({
+    price,
+    change24h,
+    yearlyHigh,
+    yearlyLow,
+    ath,
+    drawdown,
+    ma200w,
+    deepValueUpper,
+    accumulationUpper,
+    fairValueUpper,
+    premiumUpper,
+    safeZoneUpper,
+    strongValueUpper,
+    deepValueBuyUpper,
+    extremeValueUpper,
+    panicValueUpper,
+    perf30d: percentChange(price, prev30d),
+    perf90d: percentChange(price, prev90d),
+  });
+
   return {
     price,
     change24h,
     dataHealth,
+    marketCycle,
     yearlyHigh,
     yearlyLow,
     ath,
