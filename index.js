@@ -1037,16 +1037,16 @@ function getDashboardLiquidity({ volRatio, rangePos30, change24h }) {
 }
 
 function scoreToDashboardSignal(score) {
-  if (score >= 88) return "Buy Zone";
-  if (score >= 74) return "Accumulation Watch";
-  if (score >= 60) return "Constructive";
-  if (score >= 43) return "Caution";
+  if (score >= 90) return "Strong Buy";
+  if (score >= 78) return "Buy";
+  if (score >= 58) return "Constructive";
+  if (score >= 42) return "Caution";
   return "Risk-Off";
 }
 
 function getDashboardConviction(signal, confidence) {
-  if (signal === "Buy Zone" && confidence >= 78) return "High";
-  if (["Buy Zone", "Accumulation Watch", "Constructive"].includes(signal) && confidence >= 62) return "Medium";
+  if (signal === "Strong Buy" || confidence >= 85) return "High";
+  if (signal === "Buy" || signal === "Constructive" || confidence >= 68) return "Medium";
   return "Low";
 }
 
@@ -1086,245 +1086,225 @@ function buildDashboardFinalSignal(metrics) {
   const fearGreedValue = safeNumber(metrics.fearGreed?.value, 50);
   const rangePos30 = calculateRangePosition(metrics.price, metrics.high30d, metrics.low30d);
   const rangePos90 = calculateRangePosition(metrics.price, metrics.high90d, metrics.low90d);
-  const perf7d = percentChange(metrics.price, metrics.close7d);
   const perf30d = safeNumber(metrics.perf30d, 0);
-  const perf90d = safeNumber(metrics.perf90d, 0);
   const change24h = safeNumber(metrics.change24h, 0);
   const volRatio = safeNumber(metrics.volRatio, 1);
   const flow = safeNumber(metrics.btcFlow24hUsd, 0);
 
-  const antiFomoActive =
-    rangePos30 > 78 ||
-    rangePos90 > 84 ||
-    fearGreedValue >= 70 ||
-    (change24h > 3.0 && structure.volatility === "High") ||
-    (change24h > 2.0 && structure.liquidity === "Thin") ||
-    (perf7d > 6 && rangePos30 > 70) ||
-    (fearGreedValue >= 64 && rangePos30 > 70);
-
-  const overheatedByRange =
-    rangePos30 >= 72 ||
-    rangePos90 >= 82 ||
-    (rangePos30 >= 68 && perf7d >= 4) ||
-    (rangePos90 >= 76 && perf30d >= 6) ||
-    (fearGreedValue >= 66 && rangePos30 >= 66) ||
-    (change24h >= 2.4 && rangePos30 >= 64) ||
-    (volRatio <= 0.92 && change24h >= 1.8 && rangePos30 >= 62);
-
-  const undervaluedByRange =
-    (rangePos90 <= 34 && fearGreedValue <= 48) ||
-    (rangePos30 <= 28 && perf30d <= -4 && fearGreedValue <= 55);
-
-  const marketState = undervaluedByRange
-    ? "Undervalued"
-    : overheatedByRange
-      ? "Overheated"
-      : "Fair Value";
-
   const cyclePosition =
-    rangePos90 <= 30 && perf90d <= 5
+    rangePos90 < 32 && safeNumber(metrics.perf90d, 0) <= 4
       ? "Early Cycle"
-      : rangePos90 <= 58
+      : rangePos90 < 62
         ? "Mid Cycle"
-        : rangePos90 <= 82
+        : rangePos90 < 82
           ? "Late Cycle"
           : "Peak Risk";
 
+  const marketState =
+    rangePos30 <= 28 && fearGreedValue <= 42
+      ? "Undervalued"
+      : rangePos30 >= 74 || fearGreedValue >= 72
+        ? "Overheated"
+        : "Fair Value";
+
   const holderBehavior =
-    (perf30d > 0 && change24h <= 0 && rangePos90 < 72) || (rangePos90 < 55 && fearGreedValue <= 40)
+    (perf30d > 0 && change24h <= 0) || (rangePos90 < 55 && fearGreedValue <= 40)
       ? "Accumulating"
-      : (perf30d < -4 && change24h < 0) || (rangePos90 > 74 && fearGreedValue >= 68)
+      : (perf30d < 0 && change24h < 0) || (rangePos90 > 72 && fearGreedValue >= 68)
         ? "Distributing"
         : "Neutral";
 
+  const antiFomoActive =
+    rangePos30 > 80 ||
+    rangePos90 > 84 ||
+    fearGreedValue >= 72 ||
+    (change24h > 3.2 && structure.volatility === "High") ||
+    (change24h > 2.2 && structure.liquidity === "Thin") ||
+    (fearGreedValue >= 68 && rangePos30 > 76);
+
   let score = 50;
+
   if (structure.trend === "Bullish") score += 14;
-  if (structure.trend === "Recovery") score += 9;
-  if (structure.trend === "Range") score += 1;
-  if (structure.trend === "Weakening") score -= 8;
-  if (structure.trend === "Bearish") score -= 15;
+  if (structure.trend === "Bearish") score -= 14;
 
-  if (structure.liquidity === "Strong") score += 11;
-  if (structure.liquidity === "Supportive") score += 6;
-  if (structure.liquidity === "Thin") score -= 11;
+  if (structure.liquidity === "Strong") score += 10;
+  if (structure.liquidity === "Thin") score -= 10;
 
-  if (marketState === "Undervalued") score += 13;
-  if (marketState === "Overheated") score -= 16;
-  if (cyclePosition === "Early Cycle") score += 7;
-  if (cyclePosition === "Peak Risk") score -= 10;
+  if (fearGreedValue <= 30 && rangePos90 < 58) score += 10;
+  if (fearGreedValue >= 72 || rangePos30 > 82) score -= 12;
 
-  if (holderBehavior === "Accumulating") score += 7;
-  if (holderBehavior === "Distributing") score -= 8;
+  if (rangePos90 < 35) score += 8;
+  if (rangePos90 > 84) score -= 10;
 
-  if (fearGreedValue <= 25 && rangePos90 < 60) score += 8;
-  else if (fearGreedValue <= 40 && rangePos90 < 65) score += 4;
-  if (fearGreedValue >= 76) score -= 10;
-  else if (fearGreedValue >= 68) score -= 5;
+  if (perf30d > 0 && change24h <= 0) score += 5;
+  if (perf30d < 0 && change24h < 0) score -= 6;
 
-  if (perf30d > 5 && perf90d > 8) score += 5;
-  if (perf7d > 8 && rangePos30 > 75) score -= 5;
-  if (perf30d < -8 && perf90d < 0) score -= 8;
+  if (volRatio >= 1.2) score += 4;
+  if (volRatio <= 0.82) score -= 4;
 
-  if (volRatio >= 1.25 && change24h >= 0) score += 4;
-  if (volRatio <= 0.78) score -= 5;
-  if (flow > 350_000_000 && change24h >= 0) score += 4;
-  if (flow < -350_000_000 && change24h <= 0) score -= 5;
-  if (antiFomoActive) score -= 9;
+  if (flow > 250_000_000 && change24h >= 0) score += 4;
+  if (flow < -250_000_000 && change24h <= 0) score -= 5;
 
-  score = clamp(Math.round(score), 8, 96);
+  if (structure.trend === "Bullish" && fearGreedValue <= 35 && rangePos90 < 55) score += 4;
+  if (structure.trend === "Bearish" && fearGreedValue >= 60) score -= 4;
+
+  score = clamp(Math.round(score), 10, 98);
 
   let signal = scoreToDashboardSignal(score);
-  if (signal === "Buy Zone" && (antiFomoActive || structure.liquidity === "Thin" || structure.trend === "Bearish")) {
-    signal = "Accumulation Watch";
-  }
-  if (signal === "Accumulation Watch" && (antiFomoActive || marketState === "Overheated")) {
-    signal = score >= 60 ? "Constructive" : "Caution";
-  }
-  if (signal === "Constructive" && (marketState === "Overheated" || holderBehavior === "Distributing")) {
-    signal = "Caution";
-  }
-  if (structure.trend === "Bearish" && score < 56) signal = "Risk-Off";
 
-  const alignment = [
-    ["trend", ["Bullish", "Recovery"].includes(structure.trend)],
-    ["liquidity", ["Strong", "Supportive"].includes(structure.liquidity)],
-    ["valuation", marketState === "Undervalued" || (marketState === "Fair Value" && rangePos90 < 65)],
-    ["behavior", holderBehavior === "Accumulating"],
-    ["risk", !antiFomoActive && structure.volatility !== "High"],
-    ["momentum", perf30d >= 0 || (fearGreedValue <= 35 && rangePos90 < 60)],
-  ];
-  const positiveAlignment = alignment.filter(([, ok]) => ok).length;
-  const missingCoreData = metrics.dataHealth?.missing ?? 0;
+  if (signal === "Strong Buy" && (antiFomoActive || structure.liquidity !== "Strong")) {
+    signal = "Buy";
+  }
+  if (signal === "Buy" && (antiFomoActive || structure.trend !== "Bullish")) {
+    signal = score >= 58 ? "Constructive" : "Caution";
+  }
+  if ((signal === "Constructive" || signal === "Caution") && (structure.trend === "Bearish" || marketState === "Overheated")) {
+    signal = score >= 42 ? "Caution" : "Risk-Off";
+  }
 
-  let confidence = 42;
-  confidence += positiveAlignment * 7;
-  confidence += clamp(Math.abs(score - 50) * 0.52, 0, 18);
-  if (structure.trend === "Range") confidence -= 3;
-  if (structure.volatility === "High") confidence -= 6;
-  if (structure.liquidity === "Thin") confidence -= 8;
+  let confidence = 46;
+  const alignmentCount = [
+    structure.trend === "Bullish",
+    structure.liquidity === "Strong",
+    marketState === "Undervalued",
+    holderBehavior === "Accumulating",
+    !antiFomoActive,
+  ].filter(Boolean).length;
+
+  confidence += alignmentCount * 7;
+  confidence += clamp(Math.abs(score - 50) * 0.72, 0, 20);
   if (antiFomoActive) confidence -= 10;
-  if (marketState === "Fair Value" && holderBehavior === "Neutral") confidence -= 4;
-  if (missingCoreData > 0) confidence -= missingCoreData * 8;
-  confidence = clamp(Math.round(confidence), 28, 92);
+  if (structure.liquidity === "Thin") confidence -= 7;
+  if (marketState === "Fair Value" && holderBehavior === "Neutral") confidence -= 3;
+  if (structure.volatility === "High" && signal !== "Strong Buy") confidence -= 4;
+  if ((metrics.dataHealth?.missing ?? 0) > 0) confidence -= (metrics.dataHealth?.missing ?? 0) * 8;
+  confidence = clamp(Math.round(confidence), 42, 95);
 
   const conviction = getDashboardConviction(signal, confidence);
 
   let entryRiskScore = 0;
   if (structure.volatility === "High") entryRiskScore += 2;
-  if (structure.trend === "Bearish" || structure.trend === "Weakening") entryRiskScore += 2;
+  else if (structure.volatility === "Moderate") entryRiskScore += 1;
+  if (structure.trend === "Bearish") entryRiskScore += 1;
   if (marketState === "Overheated") entryRiskScore += 2;
   if (antiFomoActive) entryRiskScore += 2;
   if (holderBehavior === "Distributing") entryRiskScore += 1;
+  if (signal === "Caution") entryRiskScore += 1;
+  if (signal === "Risk-Off") entryRiskScore += 1;
   if (cyclePosition === "Peak Risk") entryRiskScore += 1;
-  if (structure.liquidity === "Thin") entryRiskScore += 1;
-  const entryRisk = entryRiskScore >= 6 ? "High" : entryRiskScore >= 3 ? "Medium" : "Low";
 
-  const reasons = [];
-  reasons.push(
-    structure.trend === "Bullish" || structure.trend === "Recovery"
-      ? "Medium-term structure is improving."
-      : structure.trend === "Bearish" || structure.trend === "Weakening"
-        ? "Medium-term structure is still weak."
-        : "Market structure is still range-bound."
-  );
-  reasons.push(
-    marketState === "Undervalued"
-      ? "Price is closer to value zones than overheated zones."
-      : marketState === "Overheated"
-        ? "Price is elevated relative to recent range and sentiment."
-        : "Valuation is around fair value, so edge is moderate."
-  );
-  reasons.push(
-    antiFomoActive
-      ? "Anti-FOMO is active because the move looks stretched."
-      : "No major FOMO warning is active right now."
-  );
+  let entryRisk = "Low";
+  if (entryRiskScore >= 6) entryRisk = "High";
+  else if (entryRiskScore >= 3) entryRisk = "Medium";
 
-  let summary = "Risk and opportunity are balanced. The dashboard favors patience and staged decisions over forced conviction.";
-  if (signal === "Buy Zone") {
-    summary = "This is a rare high-confluence investor zone. Structure, valuation and participation are aligned enough to support staged accumulation.";
-  } else if (signal === "Accumulation Watch") {
-    summary = "Conditions are becoming attractive, but confirmation is not complete. Staged accumulation is better than aggressive chasing.";
+  let summary =
+    "Bitcoin is in a balanced regime. Conditions do not justify aggressive action, so this dashboard leans toward patience rather than forced conviction.";
+  if (signal === "Strong Buy") {
+    summary = "This is a rare high-confluence window. Structure, valuation and behavior are aligned strongly enough to support an exceptional accumulation setup.";
+  } else if (signal === "Buy") {
+    summary = "The setup is constructive enough for a buy bias, but only because structure, valuation and behavior are aligned. This state is intentionally strict.";
   } else if (signal === "Constructive") {
-    summary = "The setup is constructive, but not clean enough for blind aggression. Patience and staged positioning remain important.";
+    summary = "The backdrop is improving, but it is not fully asymmetric yet. This favors selective entries and monitoring, not blind aggression.";
   } else if (signal === "Caution") {
-    summary = "Signals are mixed. The market does not currently offer a clean investor edge, so selectivity matters.";
+    summary = "The market still has constructive elements, but the quality of the setup is not strong enough to justify aggressive investor entries.";
   } else if (signal === "Risk-Off") {
-    summary = "Risk conditions dominate. The dashboard favors capital protection and waiting for stronger evidence.";
+    summary = "The current environment is too fragile for constructive positioning. Defensive risk management is more appropriate than trying to force a bullish interpretation here.";
   }
 
-  const detail = antiFomoActive
-    ? "Fast upside, stretched range position or elevated sentiment increases chase risk."
-    : structure.liquidity === "Strong" || structure.liquidity === "Supportive"
-      ? "Participation supports the current move better than usual, which improves signal quality."
-      : "The signal is based on trend, valuation, participation and sentiment alignment rather than a single indicator.";
+  const detail =
+    signal === "Buy" || signal === "Strong Buy"
+      ? `Price is supported by a healthier backdrop: ${structure.trend.toLowerCase()} trend, ${structure.volatility.toLowerCase()} volatility and ${structure.liquidity.toLowerCase()} liquidity.`
+      : signal === "Constructive"
+        ? "The backdrop is improving, but it is not fully aligned yet. Better confirmation would make the case stronger."
+        : signal === "Caution"
+          ? "Caution means the market is not offering a clean investor entry yet. Usually something important is still missing."
+          : "The dashboard is reading a defensive regime. Preserving capital matters more here than forcing a bullish interpretation.";
+
+  const meaning =
+    signal === "Strong Buy"
+      ? "Strong Buy means a rare, high-conviction alignment."
+      : signal === "Buy"
+        ? "Buy means the setup is supportive enough for a positive investor bias."
+        : signal === "Constructive"
+          ? "Constructive means the backdrop is healthy, but not strong enough for an aggressive buy call."
+          : signal === "Caution"
+            ? "Caution means conditions are not clean enough for a buy signal yet."
+            : "Risk-Off means the current regime is too fragile for constructive positioning.";
+
+  const why1 =
+    signal === "Risk-Off"
+      ? "The model stays defensive because current conditions still favor caution over aggressive positioning."
+      : signal === "Caution"
+        ? "The setup has some constructive elements, but not enough confirmation to treat it as a clean investor entry."
+        : "The broader setup remains constructive, but the model still wants discipline around timing and risk.";
+  const why2 =
+    confidence >= 75
+      ? "The current read is relatively stable, so the model has stronger conviction in the broader market tone."
+      : confidence >= 60
+        ? "The current read is usable, but still mixed enough that selectivity matters."
+        : "The market read is still developing, so patience is more valuable than reacting too quickly.";
+  const why3 =
+    entryRisk === "High"
+      ? "Right now, the model sees elevated entry risk, so waiting for cleaner conditions is the safer approach."
+      : entryRisk === "Medium"
+        ? "Entry conditions are acceptable but not ideal, which is why the model still prefers a selective approach."
+        : "Entry conditions are relatively calm, but the model still favors confirmation over impulsive action.";
 
   let positioning = {
-    title: "Investor positioning",
-    stance: "Selective / staged",
-    intro: "The market is not giving a perfect signal.",
-    action: "Keep entries staged and avoid oversized decisions.",
+    title: "Positioning Strategy",
+    stance: "Hold neutral size",
+    intro: "Suggested positioning under current conditions.",
+    action: "Keep exposure measured and avoid forcing size until the setup becomes cleaner.",
     rationale: "Signals are mixed, so preserving flexibility matters more than chasing a move that is not fully confirmed.",
   };
-
-  if (signal === "Buy Zone" || signal === "Accumulation Watch") {
+  if ((signal === "Buy" || signal === "Strong Buy") && entryRisk === "Low") {
     positioning = {
-      title: "Investor positioning",
-      stance: antiFomoActive ? "Wait for cleaner pullback" : "Staged accumulation",
-      intro: antiFomoActive ? "The setup has constructive elements, but price is moving too fast." : "The setup is constructive enough for staged accumulation.",
-      action: antiFomoActive ? "Avoid chasing. Wait for a calmer entry." : "Use staged entries instead of one aggressive buy.",
-      rationale: antiFomoActive ? "Good signals can still be poor entries when momentum is stretched." : "Confluence is supportive, but staged positioning protects against volatility.",
+      title: "Positioning Strategy",
+      stance: "Light accumulation",
+      intro: "Suggested positioning under current conditions.",
+      action: "Gradual accumulation makes sense here. Add in measured stages rather than trying to time one exact entry.",
+      rationale: "Structure, valuation and holder behavior are aligned well enough to support constructive exposure without requiring aggressive full-size positioning.",
+    };
+  } else if (signal === "Constructive") {
+    positioning = {
+      title: "Positioning Strategy",
+      stance: "Selective scaling",
+      intro: "Suggested positioning under current conditions.",
+      action: "Keep entries smaller and staged. Build exposure only if you want participation without overcommitting.",
+      rationale: "The backdrop is improving, but it still lacks full alignment. This supports selective scaling more than aggressive conviction.",
+    };
+  } else if (signal === "Caution") {
+    positioning = {
+      title: "Positioning Strategy",
+      stance: "Wait for cleaner structure",
+      intro: "Suggested positioning under current conditions.",
+      action: "Stay patient and let the market show stronger confirmation or a more attractive pullback before adding meaningful size.",
+      rationale: "The setup is not broken, but it is not clean enough for confident sizing. Better entries often appear after structure improves or price resets.",
     };
   } else if (signal === "Risk-Off") {
     positioning = {
-      title: "Investor positioning",
-      stance: "Defensive / wait",
-      intro: "Risk conditions are dominant.",
-      action: "Preserve cash and wait for a better structure.",
-      rationale: "Weak structure and poor confirmation reduce the quality of investor entries.",
+      title: "Positioning Strategy",
+      stance: "Wait for lower entries",
+      intro: "Suggested positioning under current conditions.",
+      action: "Avoid forcing exposure here. Keep capital defensive until price or structure improves materially.",
+      rationale: "The environment still looks fragile, so waiting for lower prices or clearer confirmation is more sensible than treating this as a routine buy zone.",
     };
   }
-
-  const signalQuality =
-    signal === "Buy Zone"
-      ? "High Edge"
-      : signal === "Accumulation Watch"
-        ? "Developing Edge"
-        : signal === "Constructive"
-          ? "Constructive Edge"
-          : signal === "Caution"
-            ? "Mixed Edge"
-            : "Defensive";
-
-  const signalState =
-    marketState === "Overheated"
-      ? "Overheated"
-      : antiFomoActive
-        ? "Stretched"
-        : structure.trend === "Recovery"
-          ? "Building"
-          : structure.trend === "Bullish"
-            ? "Confirmed"
-            : structure.trend === "Bearish" || structure.trend === "Weakening"
-              ? "Defensive"
-              : "Range";
 
   return {
     signal,
     confidence,
     modelConfidence: confidence,
-    signalQuality,
-    signalState,
     conviction,
     entryRisk,
     summary,
-    meaning: signal === "Risk-Off" ? "Risk is dominant; patience is favored." : signal === "Caution" ? "Mixed setup; wait for confirmation." : "Constructive setup; staged action may be reasonable.",
-    tone: antiFomoActive ? "Defensive" : ["Buy Zone", "Accumulation Watch", "Constructive"].includes(signal) ? "Constructive" : "Neutral",
+    meaning,
+    tone: summary,
     detail,
-    why1: reasons[0],
-    why2: reasons[1],
-    why3: reasons[2],
-    reasons,
+    why1,
+    why2,
+    why3,
+    reasons: [why1, why2, why3],
     cyclePosition,
     marketState,
     holderBehavior,
@@ -1337,76 +1317,113 @@ function buildDashboardFinalSignal(metrics) {
 
 function buildDashboardMarketClarity(signal) {
   let stabilityScore = 0;
-  if (["Early Cycle", "Mid Cycle"].includes(signal.cyclePosition) && signal.marketStructure.volatility !== "High") stabilityScore = 2;
-  else if (signal.marketStructure.volatility !== "High" && signal.confidence >= 56) stabilityScore = 1;
+  let stabilityLabel = "Mixed";
 
-  const stabilityLabel = stabilityScore === 2 ? "Stable" : stabilityScore === 1 ? "Mixed" : "Unstable";
+  const stageLooksStable =
+    signal.cyclePosition === "Early Cycle" ||
+    signal.cyclePosition === "Mid Cycle" ||
+    signal.cyclePosition === "Late Cycle";
+
+  if (
+    stageLooksStable &&
+    signal.confidence >= 72 &&
+    signal.marketStructure.volatility !== "High"
+  ) {
+    stabilityScore = 2;
+    stabilityLabel = "Stable";
+  } else if (signal.confidence >= 58 && signal.marketStructure.volatility !== "High") {
+    stabilityScore = 1;
+    stabilityLabel = "Mixed";
+  } else {
+    stabilityScore = 0;
+    stabilityLabel = "Unstable";
+  }
 
   let trapRisk = "Low";
-  if (signal.antiFomoActive || signal.entryRisk === "High" || signal.cyclePosition === "Peak Risk" || signal.holderBehavior === "Distributing") trapRisk = "High";
-  else if (signal.entryRisk === "Medium" || signal.marketStructure.volatility === "High" || signal.signal === "Caution") trapRisk = "Medium";
+  if (
+    signal.antiFomoActive ||
+    signal.entryRisk === "High" ||
+    signal.cyclePosition === "Peak Risk"
+  ) {
+    trapRisk = "High";
+  } else if (
+    signal.entryRisk === "Medium" ||
+    signal.marketStructure.volatility === "High" ||
+    signal.signal === "Caution"
+  ) {
+    trapRisk = "Medium";
+  }
 
   let investorMode = "Neutral";
-  if (["Buy Zone", "Accumulation Watch", "Constructive"].includes(signal.signal)) investorMode = "Constructive";
-  if (signal.signal === "Risk-Off") investorMode = "Risk-Off";
+  let investorScore = 1;
+  if (
+    signal.signal === "Constructive" ||
+    signal.signal === "Buy" ||
+    signal.signal === "Strong Buy"
+  ) {
+    investorMode = "Constructive";
+    investorScore = 2;
+  } else if (signal.signal === "Risk-Off") {
+    investorMode = "Risk-Off";
+    investorScore = 0;
+  }
 
   const trapScore = trapRisk === "Low" ? 2 : trapRisk === "Medium" ? 1 : 0;
-  const investorScore = investorMode === "Constructive" ? 2 : investorMode === "Neutral" ? 1 : 0;
-  const fomoScore = signal.antiFomoActive ? 0 : 2;
-  const clarityScore = stabilityScore + trapScore + investorScore + fomoScore;
+  const antiFomoScore = signal.antiFomoActive ? 0 : 2;
+  const score = stabilityScore + trapScore + antiFomoScore + investorScore;
 
   let level = "Medium";
-  let status = "Mixed / Wait for Confirmation";
-  let description = "Structure is forming, but conditions remain mixed. Stay selective and avoid forcing entries.";
+  let status = "Mixed / Developing Structure";
+  let description = "Structure is forming, but conditions remain mixed. Stay selective.";
 
-  if (signal.signal === "Risk-Off" || clarityScore <= 3) {
+  if (score <= 3) {
     level = "Low";
-    status = "Clear Risk-Off";
-    description = "Risk is easier to identify than opportunity. The cleanest decision is patience until structure improves.";
-  } else if (signal.antiFomoActive && investorMode === "Constructive") {
+    status = "Choppy / Low Edge Quality";
+    description = "Market is choppy. Signals are less reliable. Wait for confirmation.";
+  } else if (score <= 6) {
     level = "Medium";
-    status = "Strong but Overheated";
-    description = "The broader setup has strength, but entry quality is weaker because price action looks stretched.";
-  } else if (signal.marketState === "Undervalued" && investorMode === "Constructive") {
-    level = "High";
-    status = "Accumulation-like Structure";
-    description = "Price, structure and sentiment are aligned well enough to support a disciplined accumulation mindset.";
-  } else if (clarityScore >= 7 && signal.confidence >= 64) {
-    level = "High";
-    status = "Clear / Constructive Conditions";
-    description = "The market is showing cleaner confirmation across structure, risk and participation.";
-  } else if (signal.marketState === "Overheated" || trapRisk === "High") {
-    level = "Low";
-    status = "Distribution / Trap Risk";
-    description = "The move carries elevated trap risk. Wait for cooling or stronger confirmation before acting.";
-  }
-
-  let confidence = 34;
-  confidence += stabilityScore * 11;
-  confidence += trapScore * 9;
-  confidence += investorScore * 7;
-  confidence += fomoScore === 2 ? 7 : -7;
-  confidence += signal.confidence >= 72 ? 5 : signal.confidence >= 58 ? 3 : 0;
-
-  if (level === "Low") {
-    confidence = clamp(Math.round(confidence), 28, 55);
-  } else if (level === "Medium") {
-    confidence = clamp(Math.round(confidence), 46, 72);
+    status = "Mixed / Developing Structure";
+    description = "Structure is forming, but conditions remain mixed. Stay selective.";
   } else {
-    confidence = clamp(Math.round(confidence), 68, 90);
+    level = "High";
+    status = "Clear / Tradable Conditions";
+    description = "Market conditions are clearer. Signals have stronger confirmation.";
   }
+
+  if (
+    (trapRisk === "Medium" || trapRisk === "High") &&
+    signal.antiFomoActive &&
+    investorMode === "Risk-Off"
+  ) {
+    level = "Low";
+    status = "Choppy / Low Edge Quality";
+    description = "Market is choppy. Signals are less reliable. Wait for confirmation.";
+  }
+
+  let clarityScore = 38;
+  clarityScore += stabilityScore * 14;
+  clarityScore += investorScore * 10;
+  clarityScore += antiFomoScore === 2 ? 10 : 0;
+  clarityScore += trapRisk === "Low" ? 10 : trapRisk === "Medium" ? 4 : -6;
+  clarityScore += signal.confidence >= 75 ? 8 : signal.confidence >= 62 ? 4 : 0;
+  clarityScore = clamp(Math.round(clarityScore), 28, 92);
+
+  if (level === "Low") clarityScore = clamp(clarityScore, 28, 55);
+  if (level === "Medium") clarityScore = clamp(clarityScore, 46, 78);
+  if (level === "High") clarityScore = clamp(clarityScore, 68, 92);
 
   return {
     level,
     status,
-    confidence,
-    clarityScore: confidence,
+    confidence: clarityScore,
+    clarityScore,
     stabilityLabel,
     trapRisk,
     investorMode,
     description,
   };
 }
+
 
 async function getDashboardPayload() {
   const [tickerResult, globalDataResult, fearGreedResult] = await Promise.allSettled([
