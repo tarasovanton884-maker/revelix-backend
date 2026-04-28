@@ -38,11 +38,14 @@ const PUSH_RUNTIME_STATE = {
 
 const INTELLIGENCE_STATE = {
   stableBias: "Neutral",
+  stableBiasConfidence: 58,
   stableAttractiveness: 5,
   pendingBias: null,
   pendingBiasCount: 0,
   lastUpdatedAt: 0,
   lastBiasCommitAt: 0,
+  lastBiasEvaluationAt: 0,
+  lastBiasConfidenceCommitAt: 0,
   lastAttractivenessCommitAt: 0,
   bootstrapped: false,
 };
@@ -443,20 +446,30 @@ function determineInvestorBiasCandidate({
 }
 
 function applyBiasConfirmation(candidateBias, now = Date.now()) {
-  const currentStable = INTELLIGENCE_STATE.stableBias;
+  const currentStable = INTELLIGENCE_STATE.stableBias || "Neutral";
 
   if (!candidateBias) {
     return currentStable;
   }
 
   if (!INTELLIGENCE_STATE.bootstrapped) {
-    INTELLIGENCE_STATE.stableBias = candidateBias;
-    INTELLIGENCE_STATE.pendingBias = null;
-    INTELLIGENCE_STATE.pendingBiasCount = 0;
-    INTELLIGENCE_STATE.lastBiasCommitAt = now;
     INTELLIGENCE_STATE.bootstrapped = true;
-    return candidateBias;
+    INTELLIGENCE_STATE.lastBiasCommitAt = now;
+    INTELLIGENCE_STATE.lastBiasEvaluationAt = now;
+
+    if (candidateBias !== currentStable) {
+      INTELLIGENCE_STATE.pendingBias = candidateBias;
+      INTELLIGENCE_STATE.pendingBiasCount = 1;
+    }
+
+    return currentStable;
   }
+
+  if (now - (INTELLIGENCE_STATE.lastBiasEvaluationAt || 0) < INTELLIGENCE_BIAS_EVALUATION_MS) {
+    return currentStable;
+  }
+
+  INTELLIGENCE_STATE.lastBiasEvaluationAt = now;
 
   if (candidateBias === currentStable) {
     INTELLIGENCE_STATE.pendingBias = null;
@@ -487,21 +500,90 @@ function applyBiasConfirmation(candidateBias, now = Date.now()) {
   return currentStable;
 }
 
+function calculateBiasConfidenceTarget({
+  stableBias,
+  flowScore,
+  whaleScore,
+  institutionalScore,
+  investorAttractiveness,
+  pendingBias,
+}) {
+  const mappedLabel = intelMapBiasLabel(stableBias);
+  const combinedAbsScore =
+    Math.abs(flowScore) * 0.4 +
+    Math.abs(whaleScore) * 0.35 +
+    Math.abs(institutionalScore) * 0.25;
+  const positiveVotes = [flowScore, whaleScore, institutionalScore].filter((score) => score > 0).length;
+  const negativeVotes = [flowScore, whaleScore, institutionalScore].filter((score) => score < 0).length;
+  const alignedVotes = Math.max(positiveVotes, negativeVotes);
+  const mixedPenalty = positiveVotes > 0 && negativeVotes > 0 ? 7 : 0;
+
+  let confidence = Math.round(
+    48 +
+      Math.min(22, combinedAbsScore * 0.75) +
+      Math.min(8, Math.max(0, investorAttractiveness - 5) * 1.5) +
+      alignedVotes * 3 -
+      mixedPenalty
+  );
+
+  if (mappedLabel === "Neutral Bias") {
+    confidence = Math.round(confidence * 0.9);
+  }
+
+  if (pendingBias && pendingBias !== stableBias) {
+    confidence -= 5;
+  }
+
+  return clamp(confidence, 42, 88);
+}
+
+function updateStableBiasConfidence(targetConfidence, now = Date.now()) {
+  if (!Number.isFinite(targetConfidence)) {
+    return INTELLIGENCE_STATE.stableBiasConfidence;
+  }
+
+  if (!Number.isFinite(INTELLIGENCE_STATE.stableBiasConfidence)) {
+    INTELLIGENCE_STATE.stableBiasConfidence = clamp(Math.round(targetConfidence), 42, 88);
+    INTELLIGENCE_STATE.lastBiasConfidenceCommitAt = now;
+    return INTELLIGENCE_STATE.stableBiasConfidence;
+  }
+
+  if (!INTELLIGENCE_STATE.lastBiasConfidenceCommitAt) {
+    INTELLIGENCE_STATE.lastBiasConfidenceCommitAt = now;
+    return INTELLIGENCE_STATE.stableBiasConfidence;
+  }
+
+  if (now - INTELLIGENCE_STATE.lastBiasConfidenceCommitAt < INTELLIGENCE_BIAS_CONFIDENCE_UPDATE_MS) {
+    return INTELLIGENCE_STATE.stableBiasConfidence;
+  }
+
+  const previous = INTELLIGENCE_STATE.stableBiasConfidence;
+  const limitedMove = clamp(
+    targetConfidence - previous,
+    -INTELLIGENCE_BIAS_CONFIDENCE_MAX_STEP,
+    INTELLIGENCE_BIAS_CONFIDENCE_MAX_STEP
+  );
+  const next = clamp(Math.round(previous + limitedMove), 42, 88);
+
+  INTELLIGENCE_STATE.stableBiasConfidence = next;
+  INTELLIGENCE_STATE.lastBiasConfidenceCommitAt = now;
+  return next;
+}
+
 function updateStableInvestorAttractiveness(rawScore, now = Date.now()) {
   if (!Number.isFinite(rawScore)) {
     return INTELLIGENCE_STATE.stableAttractiveness;
   }
 
   if (!Number.isFinite(INTELLIGENCE_STATE.stableAttractiveness) || INTELLIGENCE_STATE.stableAttractiveness <= 0) {
-    INTELLIGENCE_STATE.stableAttractiveness = rawScore;
+    INTELLIGENCE_STATE.stableAttractiveness = clamp(Number(rawScore.toFixed(1)), 1, 10);
     INTELLIGENCE_STATE.lastAttractivenessCommitAt = now;
-    return rawScore;
+    return INTELLIGENCE_STATE.stableAttractiveness;
   }
 
   if (!INTELLIGENCE_STATE.lastAttractivenessCommitAt) {
-    INTELLIGENCE_STATE.stableAttractiveness = rawScore;
     INTELLIGENCE_STATE.lastAttractivenessCommitAt = now;
-    return rawScore;
+    return INTELLIGENCE_STATE.stableAttractiveness;
   }
 
   if (now - INTELLIGENCE_STATE.lastAttractivenessCommitAt < INTELLIGENCE_ATTRACTIVENESS_UPDATE_MS) {
@@ -568,7 +650,10 @@ const COINGECKO_TTL = 3 * 60 * 60 * 1000;
 const FEAR_GREED_TTL = 60 * 60 * 1000;
 
 const INTELLIGENCE_BIAS_CONFIRMATION_SNAPSHOTS = 3;
+const INTELLIGENCE_BIAS_EVALUATION_MS = 5 * 60 * 1000;
 const INTELLIGENCE_MIN_BIAS_CHANGE_MS = 10 * 60 * 1000;
+const INTELLIGENCE_BIAS_CONFIDENCE_UPDATE_MS = 5 * 60 * 1000;
+const INTELLIGENCE_BIAS_CONFIDENCE_MAX_STEP = 5;
 const INTELLIGENCE_ATTRACTIVENESS_UPDATE_MS = 5 * 60 * 1000;
 const INTELLIGENCE_ATTRACTIVENESS_ALPHA = 0.18;
 const INTELLIGENCE_ATTRACTIVENESS_MAX_STEP = 0.3;
@@ -3051,24 +3136,13 @@ function intelMapBiasLabel(backendBias) {
   return "Neutral Bias";
 }
 
-function intelBuildStableBiasModel({ backendBias, flowScore, whaleScore, institutionalScore, investorAttractiveness, flowPressureEdge, pendingBias, pendingBiasCount }) {
+function intelBuildStableBiasModel({ backendBias, stableConfidence, pendingBias, pendingBiasCount }) {
   const mappedLabel = intelMapBiasLabel(backendBias);
-  const combinedAbsScore = Math.abs(flowScore) * 0.4 + Math.abs(whaleScore) * 0.35 + Math.abs(institutionalScore) * 0.25;
-  const positiveVotes = [flowScore, whaleScore, institutionalScore].filter((score) => score > 0).length;
-  const negativeVotes = [flowScore, whaleScore, institutionalScore].filter((score) => score < 0).length;
-  const alignedVotes = Math.max(positiveVotes, negativeVotes);
-  const mixedPenalty = positiveVotes > 0 && negativeVotes > 0 ? 6 : 0;
-  let confidence = Math.round(42 + Math.min(34, combinedAbsScore * 1.25) + Math.min(10, Math.max(0, investorAttractiveness - 5) * 2.2) + alignedVotes * 3 - mixedPenalty);
-  if (mappedLabel === "Accumulation Bias" || mappedLabel === "Distribution Risk") {
-    if (flowPressureEdge > 0.1) confidence += 4;
-    confidence = clamp(confidence, 46, 93);
-  } else {
-    confidence = clamp(Math.round(confidence * 0.86), 38, 76);
-  }
   const pendingLabel = pendingBias ? intelMapBiasLabel(pendingBias) : null;
   const state = pendingLabel && pendingLabel !== mappedLabel ? "Building" : "Stable";
+  const confidence = clamp(Math.round(stableConfidence || 58), 42, 88);
   const note = state === "Building"
-    ? `A possible shift toward ${pendingLabel} is forming, but it needs more confirmed snapshots before replacing the stable investor bias.`
+    ? `A possible shift toward ${pendingLabel} is forming, but it needs more confirmed backend snapshots before replacing the stable investor bias.`
     : mappedLabel === "Accumulation Bias"
       ? "The broader setup currently favors patient accumulation rather than short-term chasing."
       : mappedLabel === "Distribution Risk"
@@ -3078,18 +3152,17 @@ function intelBuildStableBiasModel({ backendBias, flowScore, whaleScore, institu
 }
 
 function buildIntelligenceModel(payload) {
-  const { price, change24h, buyPressure, sellPressure, largeBuyValue, largeSellValue, whaleBuyValue, whaleSellValue, institutionalBuyValue, institutionalSellValue, yearlyHigh, yearlyLow, ma200w, deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper, rawInvestorAttractiveness, investorBias, flowScore, whaleScore, institutionalScore, pendingBias, pendingBiasCount } = payload;
+  const { price, change24h, buyPressure, sellPressure, largeBuyValue, largeSellValue, whaleBuyValue, whaleSellValue, institutionalBuyValue, institutionalSellValue, yearlyHigh, yearlyLow, ma200w, deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper, rawInvestorAttractiveness, investorBias, stableBiasConfidence, flowScore, whaleScore, institutionalScore, pendingBias, pendingBiasCount } = payload;
   const regime = intelGetMarketRegime(change24h);
   const flowPulse = intelGetFlowPulse(buyPressure, sellPressure, change24h);
-  const flowPressureEdge = buyPressure + sellPressure > 0 ? Math.abs(buyPressure - sellPressure) / (buyPressure + sellPressure) : 0;
-  const stableBias = intelBuildStableBiasModel({ backendBias: investorBias, flowScore, whaleScore, institutionalScore, investorAttractiveness: rawInvestorAttractiveness, flowPressureEdge, pendingBias, pendingBiasCount });
+  const stableBias = intelBuildStableBiasModel({ backendBias: investorBias, stableConfidence: stableBiasConfidence, pendingBias, pendingBiasCount });
   const confidenceState = intelGetConfidenceState(stableBias.confidence);
   const whaleSignal = intelGetWhaleSignal({ largeBuyValue, largeSellValue, whaleBuyValue, whaleSellValue, institutionalBuyValue, institutionalSellValue });
   const currentZone = intelGetCurrentZone(price, deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper);
   const preliminaryRiskState = intelGetRiskState(currentZone, regime, whaleSignal.label, rawInvestorAttractiveness, stableBias.label, flowPulse.label);
   const preliminaryRiskLevel = intelGetRiskLevelDetailed(preliminaryRiskState, currentZone, stableBias.label, whaleSignal.label);
   const breakdownBase = intelGetAttractivenessBreakdown(price, ma200w, preliminaryRiskLevel, currentZone, stableBias.label, whaleSignal.label);
-  const zoneScore = Number(clamp(rawInvestorAttractiveness * 0.65 + breakdownBase.total * 0.35, 1.5, 8.8).toFixed(1));
+  const zoneScore = Number(clamp(rawInvestorAttractiveness, 1.5, 8.8).toFixed(1));
   const participationShift = zoneScore - breakdownBase.total;
   const breakdown = { ...breakdownBase, participationScore: Number((breakdownBase.participationScore + participationShift).toFixed(1)), total: zoneScore };
   const riskState = intelGetRiskState(currentZone, regime, whaleSignal.label, zoneScore, stableBias.label, flowPulse.label);
@@ -3286,6 +3359,15 @@ const dataHealth = getDataHealth([
   const now = Date.now();
   const stableBias = applyBiasConfirmation(candidateBias, now);
   const stableInvestorAttractiveness = updateStableInvestorAttractiveness(rawInvestorAttractiveness, now);
+  const targetBiasConfidence = calculateBiasConfidenceTarget({
+    stableBias,
+    flowScore,
+    whaleScore,
+    institutionalScore,
+    investorAttractiveness: stableInvestorAttractiveness,
+    pendingBias: INTELLIGENCE_STATE.pendingBias,
+  });
+  const stableBiasConfidence = updateStableBiasConfidence(targetBiasConfidence, now);
 
   INTELLIGENCE_STATE.lastUpdatedAt = now;
 
@@ -3309,6 +3391,7 @@ const dataHealth = getDataHealth([
     premiumUpper,
     rawInvestorAttractiveness: stableInvestorAttractiveness,
     investorBias: stableBias,
+    stableBiasConfidence,
     flowScore,
     whaleScore,
     institutionalScore,
@@ -3351,10 +3434,18 @@ const dataHealth = getDataHealth([
       pendingBias: INTELLIGENCE_STATE.pendingBias,
       pendingBiasCount: INTELLIGENCE_STATE.pendingBiasCount,
       stableBias: INTELLIGENCE_STATE.stableBias,
+      stableBiasConfidence: INTELLIGENCE_STATE.stableBiasConfidence,
+      targetBiasConfidence,
       stableAttractiveness: Number(INTELLIGENCE_STATE.stableAttractiveness.toFixed(1)),
       rawInvestorAttractiveness: Number(rawInvestorAttractiveness.toFixed(1)),
       lastBiasCommitAt: INTELLIGENCE_STATE.lastBiasCommitAt
         ? new Date(INTELLIGENCE_STATE.lastBiasCommitAt).toISOString()
+        : null,
+      lastBiasEvaluationAt: INTELLIGENCE_STATE.lastBiasEvaluationAt
+        ? new Date(INTELLIGENCE_STATE.lastBiasEvaluationAt).toISOString()
+        : null,
+      lastBiasConfidenceCommitAt: INTELLIGENCE_STATE.lastBiasConfidenceCommitAt
+        ? new Date(INTELLIGENCE_STATE.lastBiasConfidenceCommitAt).toISOString()
         : null,
       lastAttractivenessCommitAt: INTELLIGENCE_STATE.lastAttractivenessCommitAt
         ? new Date(INTELLIGENCE_STATE.lastAttractivenessCommitAt).toISOString()
