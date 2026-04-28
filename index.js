@@ -1312,6 +1312,7 @@ function buildDashboardFinalSignal(metrics) {
   return {
     signal,
     confidence,
+    modelConfidence: confidence,
     signalQuality,
     signalState,
     conviction,
@@ -1381,39 +1382,25 @@ function buildDashboardMarketClarity(signal) {
   }
 
   let confidence = 34;
-  confidence += stabilityScore * 13;
+  confidence += stabilityScore * 11;
   confidence += trapScore * 9;
-  confidence += investorScore * 8;
-  confidence += fomoScore === 2 ? 8 : -6;
-  confidence += signal.confidence >= 72 ? 8 : signal.confidence >= 58 ? 4 : 0;
-  confidence = clamp(Math.round(confidence), 24, 92);
+  confidence += investorScore * 7;
+  confidence += fomoScore === 2 ? 7 : -7;
+  confidence += signal.confidence >= 72 ? 5 : signal.confidence >= 58 ? 3 : 0;
 
-  const edgeQuality =
-    level === "High"
-      ? "Strong Edge"
-      : level === "Medium"
-        ? "Developing Edge"
-        : trapRisk === "High"
-          ? "Risk Edge"
-          : "Low Edge";
-
-  const clarityState =
-    signal.marketState === "Overheated"
-      ? "Overheated"
-      : trapRisk === "High"
-        ? "Trap Risk"
-        : investorMode === "Constructive" && level !== "Low"
-          ? "Constructive"
-          : investorMode === "Risk-Off"
-            ? "Defensive"
-            : "Mixed";
+  if (level === "Low") {
+    confidence = clamp(Math.round(confidence), 28, 55);
+  } else if (level === "Medium") {
+    confidence = clamp(Math.round(confidence), 46, 72);
+  } else {
+    confidence = clamp(Math.round(confidence), 68, 90);
+  }
 
   return {
     level,
     status,
     confidence,
-    edgeQuality,
-    clarityState,
+    clarityScore: confidence,
     stabilityLabel,
     trapRisk,
     investorMode,
