@@ -42,6 +42,9 @@ const INTELLIGENCE_STATE = {
   pendingBias: null,
   pendingBiasCount: 0,
   lastUpdatedAt: 0,
+  lastBiasCommitAt: 0,
+  lastAttractivenessCommitAt: 0,
+  bootstrapped: false,
 };
 
 const PUSH_TEXTS = {
@@ -439,8 +442,21 @@ function determineInvestorBiasCandidate({
   return nextBias;
 }
 
-function applyBiasConfirmation(candidateBias) {
+function applyBiasConfirmation(candidateBias, now = Date.now()) {
   const currentStable = INTELLIGENCE_STATE.stableBias;
+
+  if (!candidateBias) {
+    return currentStable;
+  }
+
+  if (!INTELLIGENCE_STATE.bootstrapped) {
+    INTELLIGENCE_STATE.stableBias = candidateBias;
+    INTELLIGENCE_STATE.pendingBias = null;
+    INTELLIGENCE_STATE.pendingBiasCount = 0;
+    INTELLIGENCE_STATE.lastBiasCommitAt = now;
+    INTELLIGENCE_STATE.bootstrapped = true;
+    return candidateBias;
+  }
 
   if (candidateBias === currentStable) {
     INTELLIGENCE_STATE.pendingBias = null;
@@ -455,14 +471,55 @@ function applyBiasConfirmation(candidateBias) {
     INTELLIGENCE_STATE.pendingBiasCount = 1;
   }
 
-  if (INTELLIGENCE_STATE.pendingBiasCount >= 2) {
+  const enoughSnapshots =
+    INTELLIGENCE_STATE.pendingBiasCount >= INTELLIGENCE_BIAS_CONFIRMATION_SNAPSHOTS;
+  const enoughTime =
+    now - (INTELLIGENCE_STATE.lastBiasCommitAt || 0) >= INTELLIGENCE_MIN_BIAS_CHANGE_MS;
+
+  if (enoughSnapshots && enoughTime) {
     INTELLIGENCE_STATE.stableBias = candidateBias;
     INTELLIGENCE_STATE.pendingBias = null;
     INTELLIGENCE_STATE.pendingBiasCount = 0;
+    INTELLIGENCE_STATE.lastBiasCommitAt = now;
     return candidateBias;
   }
 
   return currentStable;
+}
+
+function updateStableInvestorAttractiveness(rawScore, now = Date.now()) {
+  if (!Number.isFinite(rawScore)) {
+    return INTELLIGENCE_STATE.stableAttractiveness;
+  }
+
+  if (!Number.isFinite(INTELLIGENCE_STATE.stableAttractiveness) || INTELLIGENCE_STATE.stableAttractiveness <= 0) {
+    INTELLIGENCE_STATE.stableAttractiveness = rawScore;
+    INTELLIGENCE_STATE.lastAttractivenessCommitAt = now;
+    return rawScore;
+  }
+
+  if (!INTELLIGENCE_STATE.lastAttractivenessCommitAt) {
+    INTELLIGENCE_STATE.stableAttractiveness = rawScore;
+    INTELLIGENCE_STATE.lastAttractivenessCommitAt = now;
+    return rawScore;
+  }
+
+  if (now - INTELLIGENCE_STATE.lastAttractivenessCommitAt < INTELLIGENCE_ATTRACTIVENESS_UPDATE_MS) {
+    return INTELLIGENCE_STATE.stableAttractiveness;
+  }
+
+  const previous = INTELLIGENCE_STATE.stableAttractiveness;
+  const smoothed = previous + (rawScore - previous) * INTELLIGENCE_ATTRACTIVENESS_ALPHA;
+  const limitedMove = clamp(
+    smoothed - previous,
+    -INTELLIGENCE_ATTRACTIVENESS_MAX_STEP,
+    INTELLIGENCE_ATTRACTIVENESS_MAX_STEP
+  );
+  const next = clamp(previous + limitedMove, 1, 10);
+
+  INTELLIGENCE_STATE.stableAttractiveness = Number(next.toFixed(1));
+  INTELLIGENCE_STATE.lastAttractivenessCommitAt = now;
+  return INTELLIGENCE_STATE.stableAttractiveness;
 }
 
 function calculateInvestorAttractiveness({
@@ -509,6 +566,12 @@ const BINANCE_TRADES_TTL = 30 * 1000;
 
 const COINGECKO_TTL = 3 * 60 * 60 * 1000;
 const FEAR_GREED_TTL = 60 * 60 * 1000;
+
+const INTELLIGENCE_BIAS_CONFIRMATION_SNAPSHOTS = 3;
+const INTELLIGENCE_MIN_BIAS_CHANGE_MS = 10 * 60 * 1000;
+const INTELLIGENCE_ATTRACTIVENESS_UPDATE_MS = 5 * 60 * 1000;
+const INTELLIGENCE_ATTRACTIVENESS_ALPHA = 0.18;
+const INTELLIGENCE_ATTRACTIVENESS_MAX_STEP = 0.3;
 
 const BTC_CIRCULATING_SUPPLY = 19_600_000;
 
@@ -3004,8 +3067,13 @@ function intelBuildStableBiasModel({ backendBias, flowScore, whaleScore, institu
   }
   const pendingLabel = pendingBias ? intelMapBiasLabel(pendingBias) : null;
   const state = pendingLabel && pendingLabel !== mappedLabel ? "Building" : "Stable";
-  const note = state === "Building" ? `
-A possible shift toward ${pendingLabel} is forming, but it needs more confirmation before replacing the stable bias.`.trim() : mappedLabel === "Accumulation Bias" ? "Backend-confirmed accumulation conditions are holding across updates." : mappedLabel === "Distribution Risk" ? "Backend-confirmed distribution pressure is holding across updates." : "Current conditions remain mixed, so no stronger investor bias is confirmed yet.";
+  const note = state === "Building"
+    ? `A possible shift toward ${pendingLabel} is forming, but it needs more confirmed snapshots before replacing the stable investor bias.`
+    : mappedLabel === "Accumulation Bias"
+      ? "The broader setup currently favors patient accumulation rather than short-term chasing."
+      : mappedLabel === "Distribution Risk"
+        ? "The broader setup currently favors risk control over adding exposure."
+        : "The broader setup is balanced, so patience matters more than forcing a directional view.";
   return { label: mappedLabel, confidence, state, pendingLabel, pendingCount: pendingBiasCount || 0, note };
 }
 
@@ -3215,10 +3283,11 @@ const dataHealth = getDataHealth([
     previousBias: INTELLIGENCE_STATE.stableBias,
   });
 
-  const stableBias = applyBiasConfirmation(candidateBias);
+  const now = Date.now();
+  const stableBias = applyBiasConfirmation(candidateBias, now);
+  const stableInvestorAttractiveness = updateStableInvestorAttractiveness(rawInvestorAttractiveness, now);
 
-  INTELLIGENCE_STATE.stableAttractiveness = rawInvestorAttractiveness;
-  INTELLIGENCE_STATE.lastUpdatedAt = Date.now();
+  INTELLIGENCE_STATE.lastUpdatedAt = now;
 
   const intelligenceModel = buildIntelligenceModel({
     price,
@@ -3238,7 +3307,7 @@ const dataHealth = getDataHealth([
     accumulationUpper,
     fairValueUpper,
     premiumUpper,
-    rawInvestorAttractiveness,
+    rawInvestorAttractiveness: stableInvestorAttractiveness,
     investorBias: stableBias,
     flowScore,
     whaleScore,
@@ -3270,7 +3339,8 @@ const dataHealth = getDataHealth([
     accumulationUpper,
     fairValueUpper,
     premiumUpper,
-    investorAttractiveness: Number(rawInvestorAttractiveness.toFixed(1)),
+    investorAttractiveness: Number(stableInvestorAttractiveness.toFixed(1)),
+    rawInvestorAttractiveness: Number(rawInvestorAttractiveness.toFixed(1)),
     investorBias: stableBias,
     stability: {
       valuationZone,
@@ -3282,6 +3352,13 @@ const dataHealth = getDataHealth([
       pendingBiasCount: INTELLIGENCE_STATE.pendingBiasCount,
       stableBias: INTELLIGENCE_STATE.stableBias,
       stableAttractiveness: Number(INTELLIGENCE_STATE.stableAttractiveness.toFixed(1)),
+      rawInvestorAttractiveness: Number(rawInvestorAttractiveness.toFixed(1)),
+      lastBiasCommitAt: INTELLIGENCE_STATE.lastBiasCommitAt
+        ? new Date(INTELLIGENCE_STATE.lastBiasCommitAt).toISOString()
+        : null,
+      lastAttractivenessCommitAt: INTELLIGENCE_STATE.lastAttractivenessCommitAt
+        ? new Date(INTELLIGENCE_STATE.lastAttractivenessCommitAt).toISOString()
+        : null,
       lastUpdatedAt: new Date(INTELLIGENCE_STATE.lastUpdatedAt).toISOString(),
     },
   };
