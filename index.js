@@ -1170,14 +1170,50 @@ function safeNumber(value, fallback = null) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function getDashboardTrend({ perf30d, perf90d, price, high30d, low30d, high90d, low90d }) {
+function getDashboardTrend({
+  perf30d,
+  perf90d,
+  price,
+  high30d,
+  low30d,
+  high90d,
+  low90d,
+  change24h,
+  volRatio,
+  fearGreedValue,
+}) {
   const pos30 = calculateRangePosition(price, high30d, low30d);
   const pos90 = calculateRangePosition(price, high90d, low90d);
 
-  if (perf90d >= 14 && perf30d >= 3 && pos30 >= 45) return "Bullish";
-  if (perf90d <= -10 || (perf30d <= -6 && pos90 < 55)) return "Bearish";
-  if (perf30d >= 4 && pos90 >= 42) return "Recovery";
-  if (perf30d <= -3 && pos30 <= 42) return "Weakening";
+  const antiFomo =
+    pos30 > 80 ||
+    pos90 > 84 ||
+    fearGreedValue >= 72 ||
+    (change24h > 3.2 && volRatio >= 1.2) ||
+    (fearGreedValue >= 68 && pos30 > 76);
+
+  if (
+    perf90d >= 18 &&
+    perf30d >= 6 &&
+    pos30 >= 50 &&
+    pos90 >= 45 &&
+    !antiFomo
+  ) {
+    return "Bullish";
+  }
+
+  if (perf90d <= -10 || (perf30d <= -6 && pos90 < 55)) {
+    return "Bearish";
+  }
+
+  if (perf30d >= 4 && pos90 >= 42) {
+    return "Recovery";
+  }
+
+  if (perf30d <= -3 && pos30 <= 42) {
+    return "Weakening";
+  }
+
   return "Range";
 }
 
@@ -1222,15 +1258,18 @@ function buildDashboardMarketStructure(metrics) {
   const rangePos30 = calculateRangePosition(metrics.price, metrics.high30d, metrics.low30d);
   const rangePos90 = calculateRangePosition(metrics.price, metrics.high90d, metrics.low90d);
 
-  const trend = getDashboardTrend({
-    perf30d: metrics.perf30d,
-    perf90d: metrics.perf90d,
-    price: metrics.price,
-    high30d: metrics.high30d,
-    low30d: metrics.low30d,
-    high90d: metrics.high90d,
-    low90d: metrics.low90d,
-  });
+ const trend = getDashboardTrend({
+  perf30d: metrics.perf30d,
+  perf90d: metrics.perf90d,
+  price: metrics.price,
+  high30d: metrics.high30d,
+  low30d: metrics.low30d,
+  high90d: metrics.high90d,
+  low90d: metrics.low90d,
+  change24h: metrics.change24h,
+  volRatio: metrics.volRatio,
+  fearGreedValue: safeNumber(metrics.fearGreed?.value, 50),
+});
 
   const volatility = getDashboardVolatility({
     change24h: metrics.change24h,
