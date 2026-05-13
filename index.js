@@ -58,6 +58,20 @@ const INTELLIGENCE_STATE = {
   lastDashboardSignalEvaluationAt: 0,
   lastDashboardSignalCommitAt: 0,
 
+  // Stabilizes Dashboard trend so price bounces do not instantly become Bullish.
+  stableDashboardTrend: null,
+  pendingDashboardTrend: null,
+  pendingDashboardTrendCount: 0,
+  lastDashboardTrendEvaluationAt: 0,
+  lastDashboardTrendCommitAt: 0,
+
+  // Stabilizes Intelligence medium-term regime so it behaves like a real medium timeframe.
+  stableMediumTermRegime: null,
+  pendingMediumTermRegime: null,
+  pendingMediumTermRegimeCount: 0,
+  lastMediumTermRegimeEvaluationAt: 0,
+  lastMediumTermRegimeCommitAt: 0,
+
   lastUpdatedAt: 0,
   lastBiasCommitAt: 0,
   lastBiasEvaluationAt: 0,
@@ -673,6 +687,179 @@ function applyDashboardSignalConfirmation(candidateSignal, now = Date.now()) {
   return currentStable;
 }
 
+
+function getDashboardTrendRank(trend) {
+  const ranks = {
+    Bearish: 0,
+    Weakening: 1,
+    Range: 2,
+    Recovery: 3,
+    Bullish: 4,
+  };
+
+  return ranks[trend] ?? 2;
+}
+
+function getDashboardTrendByRank(rank) {
+  if (rank <= 0) return "Bearish";
+  if (rank === 1) return "Weakening";
+  if (rank === 2) return "Range";
+  if (rank === 3) return "Recovery";
+  return "Bullish";
+}
+
+function applyDashboardTrendConfirmation(candidateTrend, now = Date.now()) {
+  if (!candidateTrend) {
+    return INTELLIGENCE_STATE.stableDashboardTrend || "Range";
+  }
+
+  const currentStable = INTELLIGENCE_STATE.stableDashboardTrend || candidateTrend;
+
+  if (!INTELLIGENCE_STATE.stableDashboardTrend) {
+    INTELLIGENCE_STATE.stableDashboardTrend = candidateTrend;
+    INTELLIGENCE_STATE.lastDashboardTrendCommitAt = now;
+    INTELLIGENCE_STATE.lastDashboardTrendEvaluationAt = now;
+    return candidateTrend;
+  }
+
+  const currentRank = getDashboardTrendRank(currentStable);
+  const candidateRank = getDashboardTrendRank(candidateTrend);
+
+  // Risk deterioration is allowed immediately. Improvements need confirmation.
+  if (candidateRank < currentRank) {
+    INTELLIGENCE_STATE.stableDashboardTrend = candidateTrend;
+    INTELLIGENCE_STATE.pendingDashboardTrend = null;
+    INTELLIGENCE_STATE.pendingDashboardTrendCount = 0;
+    INTELLIGENCE_STATE.lastDashboardTrendCommitAt = now;
+    INTELLIGENCE_STATE.lastDashboardTrendEvaluationAt = now;
+    return candidateTrend;
+  }
+
+  if (candidateRank === currentRank) {
+    INTELLIGENCE_STATE.pendingDashboardTrend = null;
+    INTELLIGENCE_STATE.pendingDashboardTrendCount = 0;
+    return currentStable;
+  }
+
+  if (now - (INTELLIGENCE_STATE.lastDashboardTrendEvaluationAt || 0) < DASHBOARD_TREND_EVALUATION_MS) {
+    return currentStable;
+  }
+
+  INTELLIGENCE_STATE.lastDashboardTrendEvaluationAt = now;
+
+  if (INTELLIGENCE_STATE.pendingDashboardTrend === candidateTrend) {
+    INTELLIGENCE_STATE.pendingDashboardTrendCount += 1;
+  } else {
+    INTELLIGENCE_STATE.pendingDashboardTrend = candidateTrend;
+    INTELLIGENCE_STATE.pendingDashboardTrendCount = 1;
+  }
+
+  const enoughSnapshots =
+    INTELLIGENCE_STATE.pendingDashboardTrendCount >= DASHBOARD_TREND_CONFIRMATION_SNAPSHOTS;
+  const enoughTime =
+    now - (INTELLIGENCE_STATE.lastDashboardTrendCommitAt || 0) >= DASHBOARD_MIN_TREND_CHANGE_MS;
+
+  if (enoughSnapshots && enoughTime) {
+    // Move only one step per confirmation window: Range -> Recovery -> Bullish, not Range -> Bullish.
+    const nextRank = Math.min(currentRank + 1, candidateRank);
+    const nextTrend = getDashboardTrendByRank(nextRank);
+
+    INTELLIGENCE_STATE.stableDashboardTrend = nextTrend;
+    INTELLIGENCE_STATE.pendingDashboardTrend = null;
+    INTELLIGENCE_STATE.pendingDashboardTrendCount = 0;
+    INTELLIGENCE_STATE.lastDashboardTrendCommitAt = now;
+    return nextTrend;
+  }
+
+  return currentStable;
+}
+
+function getMediumTermRegimeRank(regime) {
+  const ranks = {
+    "Distribution Phase": 0,
+    "Transition Phase": 1,
+    "Accumulation Phase": 2,
+    "Re-Accumulation": 3,
+  };
+
+  return ranks[regime] ?? 1;
+}
+
+function getMediumTermRegimeByRank(rank) {
+  if (rank <= 0) return "Distribution Phase";
+  if (rank === 1) return "Transition Phase";
+  if (rank === 2) return "Accumulation Phase";
+  return "Re-Accumulation";
+}
+
+function applyMediumTermRegimeConfirmation(candidateRegime, now = Date.now()) {
+  if (!candidateRegime) {
+    return INTELLIGENCE_STATE.stableMediumTermRegime || "Transition Phase";
+  }
+
+  const currentStable = INTELLIGENCE_STATE.stableMediumTermRegime || candidateRegime;
+
+  if (!INTELLIGENCE_STATE.stableMediumTermRegime) {
+    INTELLIGENCE_STATE.stableMediumTermRegime = candidateRegime;
+    INTELLIGENCE_STATE.lastMediumTermRegimeCommitAt = now;
+    INTELLIGENCE_STATE.lastMediumTermRegimeEvaluationAt = now;
+    return candidateRegime;
+  }
+
+  const currentRank = getMediumTermRegimeRank(currentStable);
+  const candidateRank = getMediumTermRegimeRank(candidateRegime);
+
+  // Deterioration can update faster, but still one step at a time so medium-term does not whip around.
+  if (candidateRank < currentRank) {
+    const nextRank = Math.max(currentRank - 1, candidateRank);
+    const nextRegime = getMediumTermRegimeByRank(nextRank);
+
+    INTELLIGENCE_STATE.stableMediumTermRegime = nextRegime;
+    INTELLIGENCE_STATE.pendingMediumTermRegime = null;
+    INTELLIGENCE_STATE.pendingMediumTermRegimeCount = 0;
+    INTELLIGENCE_STATE.lastMediumTermRegimeCommitAt = now;
+    INTELLIGENCE_STATE.lastMediumTermRegimeEvaluationAt = now;
+    return nextRegime;
+  }
+
+  if (candidateRank === currentRank) {
+    INTELLIGENCE_STATE.pendingMediumTermRegime = null;
+    INTELLIGENCE_STATE.pendingMediumTermRegimeCount = 0;
+    return currentStable;
+  }
+
+  if (now - (INTELLIGENCE_STATE.lastMediumTermRegimeEvaluationAt || 0) < MEDIUM_TERM_REGIME_EVALUATION_MS) {
+    return currentStable;
+  }
+
+  INTELLIGENCE_STATE.lastMediumTermRegimeEvaluationAt = now;
+
+  if (INTELLIGENCE_STATE.pendingMediumTermRegime === candidateRegime) {
+    INTELLIGENCE_STATE.pendingMediumTermRegimeCount += 1;
+  } else {
+    INTELLIGENCE_STATE.pendingMediumTermRegime = candidateRegime;
+    INTELLIGENCE_STATE.pendingMediumTermRegimeCount = 1;
+  }
+
+  const enoughSnapshots =
+    INTELLIGENCE_STATE.pendingMediumTermRegimeCount >= MEDIUM_TERM_REGIME_CONFIRMATION_SNAPSHOTS;
+  const enoughTime =
+    now - (INTELLIGENCE_STATE.lastMediumTermRegimeCommitAt || 0) >= MEDIUM_TERM_MIN_REGIME_CHANGE_MS;
+
+  if (enoughSnapshots && enoughTime) {
+    const nextRank = Math.min(currentRank + 1, candidateRank);
+    const nextRegime = getMediumTermRegimeByRank(nextRank);
+
+    INTELLIGENCE_STATE.stableMediumTermRegime = nextRegime;
+    INTELLIGENCE_STATE.pendingMediumTermRegime = null;
+    INTELLIGENCE_STATE.pendingMediumTermRegimeCount = 0;
+    INTELLIGENCE_STATE.lastMediumTermRegimeCommitAt = now;
+    return nextRegime;
+  }
+
+  return currentStable;
+}
+
 function calculateBiasConfidenceTarget({
   stableBias,
   flowScore,
@@ -838,6 +1025,14 @@ const INTELLIGENCE_MIN_RISK_CHANGE_MS = 5 * 60 * 1000;
 const DASHBOARD_SIGNAL_CONFIRMATION_SNAPSHOTS = 2;
 const DASHBOARD_SIGNAL_EVALUATION_MS = 2 * 60 * 1000;
 const DASHBOARD_MIN_SIGNAL_CHANGE_MS = 5 * 60 * 1000;
+
+const DASHBOARD_TREND_CONFIRMATION_SNAPSHOTS = 3;
+const DASHBOARD_TREND_EVALUATION_MS = 2 * 60 * 1000;
+const DASHBOARD_MIN_TREND_CHANGE_MS = 10 * 60 * 1000;
+
+const MEDIUM_TERM_REGIME_CONFIRMATION_SNAPSHOTS = 3;
+const MEDIUM_TERM_REGIME_EVALUATION_MS = 10 * 60 * 1000;
+const MEDIUM_TERM_MIN_REGIME_CHANGE_MS = 30 * 60 * 1000;
 
 const BTC_CIRCULATING_SUPPLY = 19_600_000;
 
@@ -1437,18 +1632,19 @@ function buildDashboardMarketStructure(metrics) {
   const rangePos30 = calculateRangePosition(metrics.price, metrics.high30d, metrics.low30d);
   const rangePos90 = calculateRangePosition(metrics.price, metrics.high90d, metrics.low90d);
 
- const trend = getDashboardTrend({
-  perf30d: metrics.perf30d,
-  perf90d: metrics.perf90d,
-  price: metrics.price,
-  high30d: metrics.high30d,
-  low30d: metrics.low30d,
-  high90d: metrics.high90d,
-  low90d: metrics.low90d,
-  change24h: metrics.change24h,
-  volRatio: metrics.volRatio,
-  fearGreedValue: safeNumber(metrics.fearGreed?.value, 50),
-});
+  const rawTrend = getDashboardTrend({
+    perf30d: metrics.perf30d,
+    perf90d: metrics.perf90d,
+    price: metrics.price,
+    high30d: metrics.high30d,
+    low30d: metrics.low30d,
+    high90d: metrics.high90d,
+    low90d: metrics.low90d,
+    change24h: metrics.change24h,
+    volRatio: metrics.volRatio,
+    fearGreedValue: safeNumber(metrics.fearGreed?.value, 50),
+  });
+  const trend = applyDashboardTrendConfirmation(rawTrend);
 
   const volatility = getDashboardVolatility({
     change24h: metrics.change24h,
@@ -3528,7 +3724,14 @@ function buildIntelligenceModel(payload) {
   const riskLevel = intelGetRiskLevelDetailed(riskState, currentZone, stableBias.label, whaleSignal.label);
   const attractiveness = intelGetAttractivenessLabel(zoneScore);
   const shortTermRegime = intelGetShortTermRegime(change24h, buyPressure, sellPressure, whaleSignal.direction);
-  const mediumTermRegime = intelGetMediumTermRegime(currentZone, whaleSignal.direction, zoneScore, stableBias.label, riskState);
+  const rawMediumTermRegime = intelGetMediumTermRegime(
+    currentZone,
+    whaleSignal.direction,
+    zoneScore,
+    stableBias.label,
+    riskState
+  );
+  const mediumTermRegime = applyMediumTermRegimeConfirmation(rawMediumTermRegime);
   const longTermRegime = intelGetLongTermRegime(price, ma200w, currentZone);
   const earlyRisk = intelGetEarlyRiskWarning(riskLevel, riskState, stableBias.label, whaleSignal.label, shortTermRegime, currentZone);
   const linkToMarket = intelGetLinkToMarket(riskLevel, currentZone, stableBias.label, earlyRisk.label);
