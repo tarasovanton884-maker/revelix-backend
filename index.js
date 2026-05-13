@@ -43,6 +43,21 @@ const INTELLIGENCE_STATE = {
   stableAttractiveness: 5,
   pendingBias: null,
   pendingBiasCount: 0,
+
+  // Stabilizes Intelligence risk labels so one noisy snapshot does not flip the UI.
+  stableRiskState: null,
+  pendingRiskState: null,
+  pendingRiskStateCount: 0,
+  lastRiskStateEvaluationAt: 0,
+  lastRiskStateCommitAt: 0,
+
+  // Stabilizes the dashboard investor signal so it behaves like a longer-term model.
+  stableDashboardSignal: null,
+  pendingDashboardSignal: null,
+  pendingDashboardSignalCount: 0,
+  lastDashboardSignalEvaluationAt: 0,
+  lastDashboardSignalCommitAt: 0,
+
   lastUpdatedAt: 0,
   lastBiasCommitAt: 0,
   lastBiasEvaluationAt: 0,
@@ -519,6 +534,145 @@ function applyBiasConfirmation(candidateBias, now = Date.now()) {
   return currentStable;
 }
 
+function applyRiskStateConfirmation(candidateRiskState, now = Date.now()) {
+  const currentStable =
+    INTELLIGENCE_STATE.stableRiskState || candidateRiskState || "Neutral Structure";
+
+  if (!candidateRiskState) {
+    return currentStable;
+  }
+
+  if (!INTELLIGENCE_STATE.stableRiskState) {
+    INTELLIGENCE_STATE.stableRiskState = candidateRiskState;
+    INTELLIGENCE_STATE.lastRiskStateCommitAt = now;
+    INTELLIGENCE_STATE.lastRiskStateEvaluationAt = now;
+    return candidateRiskState;
+  }
+
+  if (now - (INTELLIGENCE_STATE.lastRiskStateEvaluationAt || 0) < INTELLIGENCE_RISK_EVALUATION_MS) {
+    return currentStable;
+  }
+
+  INTELLIGENCE_STATE.lastRiskStateEvaluationAt = now;
+
+  if (candidateRiskState === currentStable) {
+    INTELLIGENCE_STATE.pendingRiskState = null;
+    INTELLIGENCE_STATE.pendingRiskStateCount = 0;
+    return currentStable;
+  }
+
+  if (INTELLIGENCE_STATE.pendingRiskState === candidateRiskState) {
+    INTELLIGENCE_STATE.pendingRiskStateCount += 1;
+  } else {
+    INTELLIGENCE_STATE.pendingRiskState = candidateRiskState;
+    INTELLIGENCE_STATE.pendingRiskStateCount = 1;
+  }
+
+  const enoughSnapshots =
+    INTELLIGENCE_STATE.pendingRiskStateCount >= INTELLIGENCE_RISK_CONFIRMATION_SNAPSHOTS;
+  const enoughTime =
+    now - (INTELLIGENCE_STATE.lastRiskStateCommitAt || 0) >= INTELLIGENCE_MIN_RISK_CHANGE_MS;
+
+  const urgentRisk =
+    candidateRiskState === "Elevated Risk" ||
+    candidateRiskState === "Late Pump Risk";
+
+  if ((enoughSnapshots && enoughTime) || urgentRisk) {
+    INTELLIGENCE_STATE.stableRiskState = candidateRiskState;
+    INTELLIGENCE_STATE.pendingRiskState = null;
+    INTELLIGENCE_STATE.pendingRiskStateCount = 0;
+    INTELLIGENCE_STATE.lastRiskStateCommitAt = now;
+    return candidateRiskState;
+  }
+
+  return currentStable;
+}
+
+function getDashboardSignalRank(signal) {
+  const ranks = {
+    "Risk-Off": 0,
+    Caution: 1,
+    Constructive: 2,
+    Buy: 3,
+    "Strong Buy": 4,
+  };
+
+  return ranks[signal] ?? 1;
+}
+
+function getDashboardSignalByRank(rank) {
+  if (rank <= 0) return "Risk-Off";
+  if (rank === 1) return "Caution";
+  if (rank === 2) return "Constructive";
+  if (rank === 3) return "Buy";
+  return "Strong Buy";
+}
+
+function applyDashboardSignalConfirmation(candidateSignal, now = Date.now()) {
+  if (!candidateSignal) {
+    return INTELLIGENCE_STATE.stableDashboardSignal || "Caution";
+  }
+
+  const currentStable = INTELLIGENCE_STATE.stableDashboardSignal || candidateSignal;
+
+  if (!INTELLIGENCE_STATE.stableDashboardSignal) {
+    INTELLIGENCE_STATE.stableDashboardSignal = candidateSignal;
+    INTELLIGENCE_STATE.lastDashboardSignalCommitAt = now;
+    INTELLIGENCE_STATE.lastDashboardSignalEvaluationAt = now;
+    return candidateSignal;
+  }
+
+  const currentRank = getDashboardSignalRank(currentStable);
+  const candidateRank = getDashboardSignalRank(candidateSignal);
+
+  // Risk deterioration is allowed immediately. Improvements must be confirmed.
+  if (candidateRank < currentRank) {
+    INTELLIGENCE_STATE.stableDashboardSignal = candidateSignal;
+    INTELLIGENCE_STATE.pendingDashboardSignal = null;
+    INTELLIGENCE_STATE.pendingDashboardSignalCount = 0;
+    INTELLIGENCE_STATE.lastDashboardSignalCommitAt = now;
+    INTELLIGENCE_STATE.lastDashboardSignalEvaluationAt = now;
+    return candidateSignal;
+  }
+
+  if (candidateRank === currentRank) {
+    INTELLIGENCE_STATE.pendingDashboardSignal = null;
+    INTELLIGENCE_STATE.pendingDashboardSignalCount = 0;
+    return currentStable;
+  }
+
+  if (now - (INTELLIGENCE_STATE.lastDashboardSignalEvaluationAt || 0) < DASHBOARD_SIGNAL_EVALUATION_MS) {
+    return currentStable;
+  }
+
+  INTELLIGENCE_STATE.lastDashboardSignalEvaluationAt = now;
+
+  if (INTELLIGENCE_STATE.pendingDashboardSignal === candidateSignal) {
+    INTELLIGENCE_STATE.pendingDashboardSignalCount += 1;
+  } else {
+    INTELLIGENCE_STATE.pendingDashboardSignal = candidateSignal;
+    INTELLIGENCE_STATE.pendingDashboardSignalCount = 1;
+  }
+
+  const enoughSnapshots =
+    INTELLIGENCE_STATE.pendingDashboardSignalCount >= DASHBOARD_SIGNAL_CONFIRMATION_SNAPSHOTS;
+  const enoughTime =
+    now - (INTELLIGENCE_STATE.lastDashboardSignalCommitAt || 0) >= DASHBOARD_MIN_SIGNAL_CHANGE_MS;
+
+  if (enoughSnapshots && enoughTime) {
+    const nextRank = Math.min(currentRank + 1, candidateRank);
+    const nextSignal = getDashboardSignalByRank(nextRank);
+
+    INTELLIGENCE_STATE.stableDashboardSignal = nextSignal;
+    INTELLIGENCE_STATE.pendingDashboardSignal = null;
+    INTELLIGENCE_STATE.pendingDashboardSignalCount = 0;
+    INTELLIGENCE_STATE.lastDashboardSignalCommitAt = now;
+    return nextSignal;
+  }
+
+  return currentStable;
+}
+
 function calculateBiasConfidenceTarget({
   stableBias,
   flowScore,
@@ -676,6 +830,14 @@ const INTELLIGENCE_BIAS_CONFIDENCE_MAX_STEP = 5;
 const INTELLIGENCE_ATTRACTIVENESS_UPDATE_MS = 5 * 60 * 1000;
 const INTELLIGENCE_ATTRACTIVENESS_ALPHA = 0.18;
 const INTELLIGENCE_ATTRACTIVENESS_MAX_STEP = 0.3;
+
+const INTELLIGENCE_RISK_CONFIRMATION_SNAPSHOTS = 2;
+const INTELLIGENCE_RISK_EVALUATION_MS = 2 * 60 * 1000;
+const INTELLIGENCE_MIN_RISK_CHANGE_MS = 5 * 60 * 1000;
+
+const DASHBOARD_SIGNAL_CONFIRMATION_SNAPSHOTS = 2;
+const DASHBOARD_SIGNAL_EVALUATION_MS = 2 * 60 * 1000;
+const DASHBOARD_MIN_SIGNAL_CHANGE_MS = 5 * 60 * 1000;
 
 const BTC_CIRCULATING_SUPPLY = 19_600_000;
 
@@ -1182,36 +1344,53 @@ function getDashboardTrend({
   volRatio,
   fearGreedValue,
 }) {
-  const pos30 = calculateRangePosition(price, high30d, low30d);
-  const pos90 = calculateRangePosition(price, high90d, low90d);
+  const pos30Raw = calculateRangePosition(price, high30d, low30d);
+  const pos90Raw = calculateRangePosition(price, high90d, low90d);
+  const pos30 = Number.isFinite(pos30Raw) ? pos30Raw : 50;
+  const pos90 = Number.isFinite(pos90Raw) ? pos90Raw : 50;
+  const p30 = safeNumber(perf30d, 0);
+  const p90 = safeNumber(perf90d, 0);
+  const ch24 = safeNumber(change24h, 0);
+  const vr = safeNumber(volRatio, 1);
+  const fng = safeNumber(fearGreedValue, 50);
 
   const antiFomo =
     pos30 > 80 ||
     pos90 > 84 ||
-    fearGreedValue >= 72 ||
-    (change24h > 3.2 && volRatio >= 1.2) ||
-    (fearGreedValue >= 68 && pos30 > 76);
+    fng >= 72 ||
+    (ch24 > 3.2 && vr >= 1.2) ||
+    (fng >= 68 && pos30 > 76);
 
+  const reboundOnly = ch24 > 0 && (p30 < 0 || pos30 < 45 || vr < 1.0);
+  const upperRangeWithoutBreadth = pos90 > 76 && vr < 1.08 && fng >= 55;
+
+  if (p90 <= -10 || (p30 <= -6 && pos90 < 62)) {
+    return "Bearish";
+  }
+
+  if (p30 <= -3 && pos30 <= 48) {
+    return "Weakening";
+  }
+
+  // Bullish is intentionally strict: it needs multi-week confirmation, not only a 24h bounce.
   if (
-    perf90d >= 18 &&
-    perf30d >= 6 &&
-    pos30 >= 50 &&
-    pos90 >= 45 &&
-    !antiFomo
+    p90 >= 16 &&
+    p30 >= 6 &&
+    pos30 >= 55 &&
+    pos90 >= 48 &&
+    vr >= 1.0 &&
+    !antiFomo &&
+    !upperRangeWithoutBreadth
   ) {
     return "Bullish";
   }
 
-  if (perf90d <= -10 || (perf30d <= -6 && pos90 < 55)) {
-    return "Bearish";
-  }
-
-  if (perf30d >= 4 && pos90 >= 42) {
+  if (p30 >= 3 && p90 >= -3 && pos30 >= 42 && !reboundOnly) {
     return "Recovery";
   }
 
-  if (perf30d <= -3 && pos30 <= 42) {
-    return "Weakening";
+  if (reboundOnly) {
+    return "Range";
   }
 
   return "Range";
@@ -1299,14 +1478,24 @@ function buildDashboardFinalSignal(metrics) {
   const volRatio = safeNumber(metrics.volRatio, 1);
   const flow = safeNumber(metrics.btcFlow24hUsd, 0);
 
-  const cyclePosition =
-    rangePos90 < 32 && safeNumber(metrics.perf90d, 0) <= 4
-      ? "Early Cycle"
-      : rangePos90 < 62
-        ? "Mid Cycle"
-        : rangePos90 < 82
-          ? "Late Cycle"
-          : "Peak Risk";
+  const perf90d = safeNumber(metrics.perf90d, 0);
+  const cycleHeatScore =
+    (rangePos90 >= 88 ? 2 : rangePos90 >= 78 ? 1 : 0) +
+    (rangePos30 >= 82 ? 1 : 0) +
+    (fearGreedValue >= 72 ? 2 : fearGreedValue >= 62 ? 1 : 0) +
+    (perf90d >= 22 && perf30d >= 7 ? 1 : 0) +
+    (volRatio >= 1.25 && change24h > 2.5 ? 1 : 0);
+
+  let cyclePosition = "Mid Cycle";
+  if (rangePos90 < 32 && perf90d <= 4) {
+    cyclePosition = "Early Cycle";
+  } else if (rangePos90 < 64) {
+    cyclePosition = "Mid Cycle";
+  } else if (rangePos90 < 86 || cycleHeatScore < 4) {
+    cyclePosition = "Late Cycle";
+  } else {
+    cyclePosition = "Peak Risk";
+  }
 
   const marketState =
     rangePos30 <= 28 && fearGreedValue <= 42
@@ -1332,17 +1521,21 @@ function buildDashboardFinalSignal(metrics) {
 
   let score = 50;
 
-  if (structure.trend === "Bullish") score += 14;
+  if (structure.trend === "Bullish") score += 10;
+  if (structure.trend === "Recovery") score += 5;
+  if (structure.trend === "Weakening") score -= 6;
   if (structure.trend === "Bearish") score -= 14;
 
-  if (structure.liquidity === "Strong") score += 10;
+  if (structure.liquidity === "Strong") score += 8;
+  if (structure.liquidity === "Supportive") score += 3;
   if (structure.liquidity === "Thin") score -= 10;
 
   if (fearGreedValue <= 30 && rangePos90 < 58) score += 10;
   if (fearGreedValue >= 72 || rangePos30 > 82) score -= 12;
 
   if (rangePos90 < 35) score += 8;
-  if (rangePos90 > 84) score -= 10;
+  if (cyclePosition === "Late Cycle") score -= 5;
+  if (cyclePosition === "Peak Risk") score -= 12;
 
   if (perf30d > 0 && change24h <= 0) score += 5;
   if (perf30d < 0 && change24h < 0) score -= 6;
@@ -1355,28 +1548,40 @@ function buildDashboardFinalSignal(metrics) {
 
   if (structure.trend === "Bullish" && fearGreedValue <= 35 && rangePos90 < 55) score += 4;
   if (structure.trend === "Bearish" && fearGreedValue >= 60) score -= 4;
+  if (cyclePosition === "Late Cycle" && structure.liquidity !== "Strong") score -= 3;
+  if (cyclePosition === "Peak Risk" && marketState !== "Undervalued") score -= 5;
 
   score = clamp(Math.round(score), 10, 98);
 
-  let signal = scoreToDashboardSignal(score);
+  let rawSignal = scoreToDashboardSignal(score);
 
-  if (signal === "Strong Buy" && (antiFomoActive || structure.liquidity !== "Strong")) {
-    signal = "Buy";
+  if (rawSignal === "Strong Buy" && (antiFomoActive || structure.liquidity !== "Strong" || cyclePosition !== "Early Cycle")) {
+    rawSignal = "Buy";
   }
-  if (signal === "Buy" && (antiFomoActive || structure.trend !== "Bullish")) {
-    signal = score >= 58 ? "Constructive" : "Caution";
+  if (rawSignal === "Buy" && (antiFomoActive || structure.trend !== "Bullish" || cyclePosition === "Late Cycle" || cyclePosition === "Peak Risk")) {
+    rawSignal = score >= 58 ? "Constructive" : "Caution";
   }
-  if ((signal === "Constructive" || signal === "Caution") && (structure.trend === "Bearish" || marketState === "Overheated")) {
-    signal = score >= 42 ? "Caution" : "Risk-Off";
+  if (
+    rawSignal === "Constructive" &&
+    (cyclePosition === "Peak Risk" ||
+      (cyclePosition === "Late Cycle" && structure.liquidity !== "Strong" && marketState !== "Undervalued"))
+  ) {
+    rawSignal = "Caution";
   }
+  if ((rawSignal === "Constructive" || rawSignal === "Caution") && (structure.trend === "Bearish" || marketState === "Overheated")) {
+    rawSignal = score >= 42 ? "Caution" : "Risk-Off";
+  }
+
+  const signal = applyDashboardSignalConfirmation(rawSignal);
 
   let confidence = 46;
   const alignmentCount = [
-    structure.trend === "Bullish",
-    structure.liquidity === "Strong",
+    structure.trend === "Bullish" || structure.trend === "Recovery",
+    structure.liquidity === "Strong" || structure.liquidity === "Supportive",
     marketState === "Undervalued",
     holderBehavior === "Accumulating",
     !antiFomoActive,
+    cyclePosition === "Early Cycle" || cyclePosition === "Mid Cycle",
   ].filter(Boolean).length;
 
   confidence += alignmentCount * 7;
@@ -1393,17 +1598,28 @@ function buildDashboardFinalSignal(metrics) {
   let entryRiskScore = 0;
   if (structure.volatility === "High") entryRiskScore += 2;
   else if (structure.volatility === "Moderate") entryRiskScore += 1;
-  if (structure.trend === "Bearish") entryRiskScore += 1;
+  if (structure.trend === "Weakening") entryRiskScore += 1;
+  if (structure.trend === "Bearish") entryRiskScore += 2;
   if (marketState === "Overheated") entryRiskScore += 2;
+  if (marketState === "Fair Value" && cyclePosition !== "Early Cycle") entryRiskScore += 1;
   if (antiFomoActive) entryRiskScore += 2;
   if (holderBehavior === "Distributing") entryRiskScore += 1;
+  if (structure.liquidity !== "Strong") entryRiskScore += cyclePosition === "Late Cycle" ? 1 : 0;
   if (signal === "Caution") entryRiskScore += 1;
-  if (signal === "Risk-Off") entryRiskScore += 1;
-  if (cyclePosition === "Peak Risk") entryRiskScore += 1;
+  if (signal === "Risk-Off") entryRiskScore += 2;
+  if (cyclePosition === "Late Cycle") entryRiskScore += 1;
+  if (cyclePosition === "Peak Risk") entryRiskScore += 3;
 
   let entryRisk = "Low";
   if (entryRiskScore >= 6) entryRisk = "High";
   else if (entryRiskScore >= 3) entryRisk = "Medium";
+
+  if ((cyclePosition === "Late Cycle" || cyclePosition === "Peak Risk") && entryRisk === "Low") {
+    entryRisk = "Medium";
+  }
+  if (cyclePosition === "Peak Risk" && marketState !== "Undervalued" && entryRisk === "Medium") {
+    entryRisk = "High";
+  }
 
   let summary =
     "Bitcoin is in a balanced regime. Conditions do not justify aggressive action, so this dashboard leans toward patience rather than forced conviction.";
@@ -3300,7 +3516,15 @@ function buildIntelligenceModel(payload) {
   const zoneScore = Number(clamp(rawInvestorAttractiveness, 1.5, 8.8).toFixed(1));
   const participationShift = zoneScore - breakdownBase.total;
   const breakdown = { ...breakdownBase, participationScore: Number((breakdownBase.participationScore + participationShift).toFixed(1)), total: zoneScore };
-  const riskState = intelGetRiskState(currentZone, regime, whaleSignal.label, zoneScore, stableBias.label, flowPulse.label);
+  const rawRiskState = intelGetRiskState(
+    currentZone,
+    regime,
+    whaleSignal.label,
+    zoneScore,
+    stableBias.label,
+    flowPulse.label
+  );
+  const riskState = applyRiskStateConfirmation(rawRiskState);
   const riskLevel = intelGetRiskLevelDetailed(riskState, currentZone, stableBias.label, whaleSignal.label);
   const attractiveness = intelGetAttractivenessLabel(zoneScore);
   const shortTermRegime = intelGetShortTermRegime(change24h, buyPressure, sellPressure, whaleSignal.direction);
