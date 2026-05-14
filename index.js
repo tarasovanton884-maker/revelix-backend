@@ -1032,7 +1032,7 @@ function calculateInvestorAttractiveness({
 
   const combinedFlow = average([flowScore, whaleScore, institutionalScore]);
   const participationBoost = clamp(combinedFlow / 35, -1.5, 1.5);
-  score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.45 : participationBoost;
+  score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.7 : participationBoost;
 
   const ch24 = Number(change24h);
   const impulseWithoutValue =
@@ -1041,8 +1041,8 @@ function calculateInvestorAttractiveness({
     price > accumulationUpper &&
     price > deepValueUpper;
 
-  if (antiFomoActive) score -= 0.8;
-  if (impulseWithoutValue) score -= 0.4;
+  if (antiFomoActive) score -= 0.4;
+  if (impulseWithoutValue) score -= 0.2;
 
   return clamp(score, 1, 10);
 }
