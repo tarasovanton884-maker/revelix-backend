@@ -40,7 +40,7 @@ const PUSH_RUNTIME_STATE = {
 const INTELLIGENCE_STATE = {
   stableBias: "Neutral",
   stableBiasConfidence: 58,
-  stableAttractiveness: 5,
+  stableAttractiveness: null,
   pendingBias: null,
   pendingBiasCount: 0,
 
@@ -548,6 +548,20 @@ function applyBiasConfirmation(candidateBias, now = Date.now()) {
   return currentStable;
 }
 
+function getRiskStateRank(riskState) {
+  const ranks = {
+    "Accumulation Opportunity": 0,
+    "Constructive Structure": 1,
+    "Constructive but Fragile": 2,
+    "Neutral Structure": 3,
+    "Watchful Structure": 4,
+    "Elevated Risk": 5,
+    "Late Pump Risk": 6,
+  };
+
+  return ranks[riskState] ?? 3;
+}
+
 function applyRiskStateConfirmation(candidateRiskState, now = Date.now()) {
   const currentStable =
     INTELLIGENCE_STATE.stableRiskState || candidateRiskState || "Neutral Structure";
@@ -563,17 +577,24 @@ function applyRiskStateConfirmation(candidateRiskState, now = Date.now()) {
     return candidateRiskState;
   }
 
-  if (now - (INTELLIGENCE_STATE.lastRiskStateEvaluationAt || 0) < INTELLIGENCE_RISK_EVALUATION_MS) {
-    return currentStable;
-  }
-
-  INTELLIGENCE_STATE.lastRiskStateEvaluationAt = now;
+  const currentRank = getRiskStateRank(currentStable);
+  const candidateRank = getRiskStateRank(candidateRiskState);
+  const worsening = candidateRank > currentRank;
+  const urgentRisk =
+    candidateRiskState === "Elevated Risk" ||
+    candidateRiskState === "Late Pump Risk";
 
   if (candidateRiskState === currentStable) {
     INTELLIGENCE_STATE.pendingRiskState = null;
     INTELLIGENCE_STATE.pendingRiskStateCount = 0;
     return currentStable;
   }
+
+  if (now - (INTELLIGENCE_STATE.lastRiskStateEvaluationAt || 0) < INTELLIGENCE_RISK_EVALUATION_MS) {
+    return currentStable;
+  }
+
+  INTELLIGENCE_STATE.lastRiskStateEvaluationAt = now;
 
   if (INTELLIGENCE_STATE.pendingRiskState === candidateRiskState) {
     INTELLIGENCE_STATE.pendingRiskStateCount += 1;
@@ -582,14 +603,10 @@ function applyRiskStateConfirmation(candidateRiskState, now = Date.now()) {
     INTELLIGENCE_STATE.pendingRiskStateCount = 1;
   }
 
-  const enoughSnapshots =
-    INTELLIGENCE_STATE.pendingRiskStateCount >= INTELLIGENCE_RISK_CONFIRMATION_SNAPSHOTS;
-  const enoughTime =
-    now - (INTELLIGENCE_STATE.lastRiskStateCommitAt || 0) >= INTELLIGENCE_MIN_RISK_CHANGE_MS;
-
-  const urgentRisk =
-    candidateRiskState === "Elevated Risk" ||
-    candidateRiskState === "Late Pump Risk";
+  const requiredSnapshots = worsening ? INTELLIGENCE_RISK_WORSENING_CONFIRMATION_SNAPSHOTS : INTELLIGENCE_RISK_CONFIRMATION_SNAPSHOTS;
+  const requiredTime = worsening ? INTELLIGENCE_MIN_RISK_WORSENING_CHANGE_MS : INTELLIGENCE_MIN_RISK_CHANGE_MS;
+  const enoughSnapshots = INTELLIGENCE_STATE.pendingRiskStateCount >= requiredSnapshots;
+  const enoughTime = now - (INTELLIGENCE_STATE.lastRiskStateCommitAt || 0) >= requiredTime;
 
   if ((enoughSnapshots && enoughTime) || urgentRisk) {
     INTELLIGENCE_STATE.stableRiskState = candidateRiskState;
@@ -930,28 +947,50 @@ function updateStableBiasConfidence(targetConfidence, now = Date.now()) {
   return next;
 }
 
+function getCachedInvestorAttractiveness() {
+  const cached = getCache("last_good_investor_attractiveness", true);
+  const value = Number(cached);
+  return Number.isFinite(value) && value >= 1 && value <= 10 ? value : null;
+}
+
+function setCachedInvestorAttractiveness(value) {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized) || normalized < 1 || normalized > 10) return;
+  setCache("last_good_investor_attractiveness", Number(normalized.toFixed(1)), INTELLIGENCE_ATTRACTIVENESS_CACHE_TTL);
+}
+
 function updateStableInvestorAttractiveness(rawScore, now = Date.now()) {
+  const cached = getCachedInvestorAttractiveness();
+
   if (!Number.isFinite(rawScore)) {
-    return INTELLIGENCE_STATE.stableAttractiveness;
+    return Number.isFinite(INTELLIGENCE_STATE.stableAttractiveness)
+      ? INTELLIGENCE_STATE.stableAttractiveness
+      : cached ?? 5;
   }
 
+  const raw = clamp(Number(rawScore.toFixed(1)), 1, 10);
+
   if (!Number.isFinite(INTELLIGENCE_STATE.stableAttractiveness) || INTELLIGENCE_STATE.stableAttractiveness <= 0) {
-    INTELLIGENCE_STATE.stableAttractiveness = clamp(Number(rawScore.toFixed(1)), 1, 10);
+    const initial = Number.isFinite(cached) ? cached : raw;
+    INTELLIGENCE_STATE.stableAttractiveness = clamp(Number(initial.toFixed(1)), 1, 10);
     INTELLIGENCE_STATE.lastAttractivenessCommitAt = now;
+    setCachedInvestorAttractiveness(INTELLIGENCE_STATE.stableAttractiveness);
     return INTELLIGENCE_STATE.stableAttractiveness;
   }
 
   if (!INTELLIGENCE_STATE.lastAttractivenessCommitAt) {
     INTELLIGENCE_STATE.lastAttractivenessCommitAt = now;
+    setCachedInvestorAttractiveness(INTELLIGENCE_STATE.stableAttractiveness);
     return INTELLIGENCE_STATE.stableAttractiveness;
   }
 
   if (now - INTELLIGENCE_STATE.lastAttractivenessCommitAt < INTELLIGENCE_ATTRACTIVENESS_UPDATE_MS) {
+    setCachedInvestorAttractiveness(INTELLIGENCE_STATE.stableAttractiveness);
     return INTELLIGENCE_STATE.stableAttractiveness;
   }
 
   const previous = INTELLIGENCE_STATE.stableAttractiveness;
-  const smoothed = previous + (rawScore - previous) * INTELLIGENCE_ATTRACTIVENESS_ALPHA;
+  const smoothed = previous + (raw - previous) * INTELLIGENCE_ATTRACTIVENESS_ALPHA;
   const limitedMove = clamp(
     smoothed - previous,
     -INTELLIGENCE_ATTRACTIVENESS_MAX_STEP,
@@ -961,11 +1000,13 @@ function updateStableInvestorAttractiveness(rawScore, now = Date.now()) {
 
   INTELLIGENCE_STATE.stableAttractiveness = Number(next.toFixed(1));
   INTELLIGENCE_STATE.lastAttractivenessCommitAt = now;
+  setCachedInvestorAttractiveness(INTELLIGENCE_STATE.stableAttractiveness);
   return INTELLIGENCE_STATE.stableAttractiveness;
 }
 
 function calculateInvestorAttractiveness({
   price,
+  change24h,
   deepValueUpper,
   accumulationUpper,
   fairValueUpper,
@@ -973,6 +1014,7 @@ function calculateInvestorAttractiveness({
   flowScore,
   whaleScore,
   institutionalScore,
+  antiFomoActive = false,
 }) {
   let score = 5;
 
@@ -989,7 +1031,18 @@ function calculateInvestorAttractiveness({
   }
 
   const combinedFlow = average([flowScore, whaleScore, institutionalScore]);
-  score += clamp(combinedFlow / 35, -1.5, 1.5);
+  const participationBoost = clamp(combinedFlow / 35, -1.5, 1.5);
+  score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.45 : participationBoost;
+
+  const ch24 = Number(change24h);
+  const impulseWithoutValue =
+    Number.isFinite(ch24) &&
+    ch24 >= 2.2 &&
+    price > accumulationUpper &&
+    price > deepValueUpper;
+
+  if (antiFomoActive) score -= 0.8;
+  if (impulseWithoutValue) score -= 0.4;
 
   return clamp(score, 1, 10);
 }
@@ -1017,10 +1070,13 @@ const INTELLIGENCE_BIAS_CONFIDENCE_MAX_STEP = 5;
 const INTELLIGENCE_ATTRACTIVENESS_UPDATE_MS = 5 * 60 * 1000;
 const INTELLIGENCE_ATTRACTIVENESS_ALPHA = 0.18;
 const INTELLIGENCE_ATTRACTIVENESS_MAX_STEP = 0.3;
+const INTELLIGENCE_ATTRACTIVENESS_CACHE_TTL = 24 * 60 * 60 * 1000;
 
-const INTELLIGENCE_RISK_CONFIRMATION_SNAPSHOTS = 2;
+const INTELLIGENCE_RISK_CONFIRMATION_SNAPSHOTS = 3;
+const INTELLIGENCE_RISK_WORSENING_CONFIRMATION_SNAPSHOTS = 2;
 const INTELLIGENCE_RISK_EVALUATION_MS = 2 * 60 * 1000;
-const INTELLIGENCE_MIN_RISK_CHANGE_MS = 5 * 60 * 1000;
+const INTELLIGENCE_MIN_RISK_CHANGE_MS = 10 * 60 * 1000;
+const INTELLIGENCE_MIN_RISK_WORSENING_CHANGE_MS = 5 * 60 * 1000;
 
 const DASHBOARD_SIGNAL_CONFIRMATION_SNAPSHOTS = 2;
 const DASHBOARD_SIGNAL_EVALUATION_MS = 2 * 60 * 1000;
@@ -3621,8 +3677,8 @@ function intelGetAttractivenessLabel(score) {
 
 function intelGetShortTermRegime(change24h, buyPressure, sellPressure, whaleDirection) {
   const flowEdge = Math.abs(buyPressure - sellPressure) / (buyPressure + sellPressure || 1);
-  if (change24h > 2 && flowEdge > 0.15 && whaleDirection === "Bullish") return "Strong Bullish";
-  if (change24h < -2 && flowEdge > 0.15 && whaleDirection === "Bearish") return "Strong Bearish";
+  if (change24h > 2 && flowEdge > 0.15 && whaleDirection === "Bullish") return "Bullish";
+  if (change24h < -2 && flowEdge > 0.15 && whaleDirection === "Bearish") return "Bearish";
   if (change24h > 1) return "Bullish";
   if (change24h < -1) return "Bearish";
   return "Neutral";
@@ -3652,7 +3708,7 @@ function intelGetEarlyRiskWarning(riskLevel, riskState, stableBiasLabel, whaleLa
   if (riskState === "Late Pump Risk") warningScore += 2;
   if (stableBiasLabel === "Distribution Risk") warningScore += 2;
   if (["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel)) warningScore += 1;
-  if (shortTermRegime === "Bearish" || shortTermRegime === "Strong Bearish") warningScore += 1;
+  if (shortTermRegime === "Bearish") warningScore += 1;
   if (currentZone === "Premium Zone") warningScore += 1;
   if (currentZone === "Overheated Zone") warningScore += 2;
   if (currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone") warningScore -= 1;
@@ -3901,8 +3957,15 @@ const dataHealth = getDataHealth([
     premiumUpper,
   });
 
+  const intelligenceAntiFomoActive =
+    (Number.isFinite(change24h) && change24h >= 3.2 && combinedFlowScore >= 12) ||
+    (Number.isFinite(change24h) && change24h >= 2.4 && valuationZone !== "deep_value" && valuationZone !== "accumulation") ||
+    (valuationZone === "premium" && Number.isFinite(change24h) && change24h > 1.6) ||
+    valuationZone === "overheated";
+
   const rawInvestorAttractiveness = calculateInvestorAttractiveness({
     price,
+    change24h,
     deepValueUpper,
     accumulationUpper,
     fairValueUpper,
@@ -3910,6 +3973,7 @@ const dataHealth = getDataHealth([
     flowScore,
     whaleScore,
     institutionalScore,
+    antiFomoActive: intelligenceAntiFomoActive,
   });
 
   const candidateBias = determineInvestorBiasCandidate({
@@ -3993,6 +4057,7 @@ const dataHealth = getDataHealth([
       whaleScore: Number(whaleScore.toFixed(2)),
       institutionalScore: Number(institutionalScore.toFixed(2)),
       combinedFlowScore: Number(combinedFlowScore.toFixed(2)),
+      antiFomoAdjusted: intelligenceAntiFomoActive,
       pendingBias: INTELLIGENCE_STATE.pendingBias,
       pendingBiasCount: INTELLIGENCE_STATE.pendingBiasCount,
       stableBias: INTELLIGENCE_STATE.stableBias,
