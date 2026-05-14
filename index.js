@@ -51,6 +51,20 @@ const INTELLIGENCE_STATE = {
   lastRiskStateEvaluationAt: 0,
   lastRiskStateCommitAt: 0,
 
+  // Stabilizes the derived Intelligence risk level so brief spikes do not flash in the UI.
+  stableRiskLevel: null,
+  pendingRiskLevel: null,
+  pendingRiskLevelCount: 0,
+  lastRiskLevelEvaluationAt: 0,
+  lastRiskLevelCommitAt: 0,
+
+  // Stabilizes early risk warning so it turns on with confirmation and turns off slowly.
+  stableEarlyRiskLabel: null,
+  pendingEarlyRiskLabel: null,
+  pendingEarlyRiskCount: 0,
+  lastEarlyRiskEvaluationAt: 0,
+  lastEarlyRiskCommitAt: 0,
+
   // Stabilizes the dashboard investor signal so it behaves like a longer-term model.
   stableDashboardSignal: null,
   pendingDashboardSignal: null,
@@ -619,6 +633,176 @@ function applyRiskStateConfirmation(candidateRiskState, now = Date.now()) {
   return currentStable;
 }
 
+function getRiskLevelRank(riskLevel) {
+  const ranks = {
+    "Low Risk": 0,
+    "Low–Medium Risk": 1,
+    "Medium Risk": 2,
+    "Medium–High Risk": 3,
+    "High Risk": 4,
+  };
+
+  return ranks[riskLevel] ?? 2;
+}
+
+function applyRiskLevelConfirmation(candidateRiskLevel, riskState, now = Date.now()) {
+  if (!candidateRiskLevel) {
+    return INTELLIGENCE_STATE.stableRiskLevel || "Medium Risk";
+  }
+
+  const currentStable =
+    INTELLIGENCE_STATE.stableRiskLevel || candidateRiskLevel || "Medium Risk";
+
+  if (!INTELLIGENCE_STATE.stableRiskLevel) {
+    INTELLIGENCE_STATE.stableRiskLevel = candidateRiskLevel;
+    INTELLIGENCE_STATE.lastRiskLevelCommitAt = now;
+    INTELLIGENCE_STATE.lastRiskLevelEvaluationAt = now;
+    return candidateRiskLevel;
+  }
+
+  if (candidateRiskLevel === currentStable) {
+    INTELLIGENCE_STATE.pendingRiskLevel = null;
+    INTELLIGENCE_STATE.pendingRiskLevelCount = 0;
+    return currentStable;
+  }
+
+  if (now - (INTELLIGENCE_STATE.lastRiskLevelEvaluationAt || 0) < INTELLIGENCE_RISK_LEVEL_EVALUATION_MS) {
+    return currentStable;
+  }
+
+  INTELLIGENCE_STATE.lastRiskLevelEvaluationAt = now;
+
+  if (INTELLIGENCE_STATE.pendingRiskLevel === candidateRiskLevel) {
+    INTELLIGENCE_STATE.pendingRiskLevelCount += 1;
+  } else {
+    INTELLIGENCE_STATE.pendingRiskLevel = candidateRiskLevel;
+    INTELLIGENCE_STATE.pendingRiskLevelCount = 1;
+  }
+
+  const currentRank = getRiskLevelRank(currentStable);
+  const candidateRank = getRiskLevelRank(candidateRiskLevel);
+  const worsening = candidateRank > currentRank;
+  const urgentRisk =
+    candidateRiskLevel === "High Risk" ||
+    riskState === "Late Pump Risk";
+
+  const requiredSnapshots = worsening
+    ? INTELLIGENCE_RISK_LEVEL_WORSENING_CONFIRMATION_SNAPSHOTS
+    : INTELLIGENCE_RISK_LEVEL_CONFIRMATION_SNAPSHOTS;
+  const requiredTime = worsening
+    ? INTELLIGENCE_MIN_RISK_LEVEL_WORSENING_CHANGE_MS
+    : INTELLIGENCE_MIN_RISK_LEVEL_CHANGE_MS;
+
+  const enoughSnapshots =
+    INTELLIGENCE_STATE.pendingRiskLevelCount >= requiredSnapshots;
+  const enoughTime =
+    now - (INTELLIGENCE_STATE.lastRiskLevelCommitAt || 0) >= requiredTime;
+
+  if ((enoughSnapshots && enoughTime) || urgentRisk) {
+    INTELLIGENCE_STATE.stableRiskLevel = candidateRiskLevel;
+    INTELLIGENCE_STATE.pendingRiskLevel = null;
+    INTELLIGENCE_STATE.pendingRiskLevelCount = 0;
+    INTELLIGENCE_STATE.lastRiskLevelCommitAt = now;
+    return candidateRiskLevel;
+  }
+
+  return currentStable;
+}
+
+function getEarlyRiskRank(label) {
+  const ranks = {
+    "Risk Stable": 0,
+    "Risk Rising": 1,
+    "Risk Active": 2,
+  };
+
+  return ranks[label] ?? 0;
+}
+
+function getEarlyRiskByLabel(label) {
+  if (label === "Risk Active") {
+    return {
+      label: "Risk Active",
+      strength: "High",
+      note: "Multiple inputs now suggest that market risk is no longer only theoretical. The environment is becoming less supportive and downside sensitivity is more relevant.",
+    };
+  }
+
+  if (label === "Risk Rising") {
+    return {
+      label: "Risk Rising",
+      strength: "Medium",
+      note: "Some early signs of structural weakening are appearing. This is not a full breakdown signal, but it does suggest that risk is starting to build beneath the surface.",
+    };
+  }
+
+  return {
+    label: "Risk Stable",
+    strength: "Low",
+    note: "The environment does not currently show strong early deterioration signals. Risk still exists, but the broader structure is not flashing a clear warning yet.",
+  };
+}
+
+function applyEarlyRiskConfirmation(candidateEarlyRisk, riskLevel, now = Date.now()) {
+  const candidateLabel = candidateEarlyRisk?.label || "Risk Stable";
+  const currentStable = INTELLIGENCE_STATE.stableEarlyRiskLabel || candidateLabel;
+
+  if (!INTELLIGENCE_STATE.stableEarlyRiskLabel) {
+    INTELLIGENCE_STATE.stableEarlyRiskLabel = candidateLabel;
+    INTELLIGENCE_STATE.lastEarlyRiskCommitAt = now;
+    INTELLIGENCE_STATE.lastEarlyRiskEvaluationAt = now;
+    return candidateEarlyRisk || getEarlyRiskByLabel(candidateLabel);
+  }
+
+  if (candidateLabel === currentStable) {
+    INTELLIGENCE_STATE.pendingEarlyRiskLabel = null;
+    INTELLIGENCE_STATE.pendingEarlyRiskCount = 0;
+    return candidateEarlyRisk || getEarlyRiskByLabel(currentStable);
+  }
+
+  if (now - (INTELLIGENCE_STATE.lastEarlyRiskEvaluationAt || 0) < INTELLIGENCE_EARLY_RISK_EVALUATION_MS) {
+    return getEarlyRiskByLabel(currentStable);
+  }
+
+  INTELLIGENCE_STATE.lastEarlyRiskEvaluationAt = now;
+
+  if (INTELLIGENCE_STATE.pendingEarlyRiskLabel === candidateLabel) {
+    INTELLIGENCE_STATE.pendingEarlyRiskCount += 1;
+  } else {
+    INTELLIGENCE_STATE.pendingEarlyRiskLabel = candidateLabel;
+    INTELLIGENCE_STATE.pendingEarlyRiskCount = 1;
+  }
+
+  const currentRank = getEarlyRiskRank(currentStable);
+  const candidateRank = getEarlyRiskRank(candidateLabel);
+  const worsening = candidateRank > currentRank;
+  const urgentRisk =
+    candidateLabel === "Risk Active" &&
+    (riskLevel === "High Risk" || riskLevel === "Medium–High Risk");
+
+  const requiredSnapshots = worsening
+    ? INTELLIGENCE_EARLY_RISK_WORSENING_CONFIRMATION_SNAPSHOTS
+    : INTELLIGENCE_EARLY_RISK_CONFIRMATION_SNAPSHOTS;
+  const requiredTime = worsening
+    ? INTELLIGENCE_MIN_EARLY_RISK_WORSENING_CHANGE_MS
+    : INTELLIGENCE_MIN_EARLY_RISK_CHANGE_MS;
+
+  const enoughSnapshots =
+    INTELLIGENCE_STATE.pendingEarlyRiskCount >= requiredSnapshots;
+  const enoughTime =
+    now - (INTELLIGENCE_STATE.lastEarlyRiskCommitAt || 0) >= requiredTime;
+
+  if ((enoughSnapshots && enoughTime) || urgentRisk) {
+    INTELLIGENCE_STATE.stableEarlyRiskLabel = candidateLabel;
+    INTELLIGENCE_STATE.pendingEarlyRiskLabel = null;
+    INTELLIGENCE_STATE.pendingEarlyRiskCount = 0;
+    INTELLIGENCE_STATE.lastEarlyRiskCommitAt = now;
+    return candidateEarlyRisk || getEarlyRiskByLabel(candidateLabel);
+  }
+
+  return getEarlyRiskByLabel(currentStable);
+}
+
 function getDashboardSignalRank(signal) {
   const ranks = {
     "Risk-Off": 0,
@@ -1077,6 +1261,18 @@ const INTELLIGENCE_RISK_WORSENING_CONFIRMATION_SNAPSHOTS = 2;
 const INTELLIGENCE_RISK_EVALUATION_MS = 2 * 60 * 1000;
 const INTELLIGENCE_MIN_RISK_CHANGE_MS = 10 * 60 * 1000;
 const INTELLIGENCE_MIN_RISK_WORSENING_CHANGE_MS = 5 * 60 * 1000;
+
+const INTELLIGENCE_RISK_LEVEL_CONFIRMATION_SNAPSHOTS = 3;
+const INTELLIGENCE_RISK_LEVEL_WORSENING_CONFIRMATION_SNAPSHOTS = 2;
+const INTELLIGENCE_RISK_LEVEL_EVALUATION_MS = 2 * 60 * 1000;
+const INTELLIGENCE_MIN_RISK_LEVEL_CHANGE_MS = 10 * 60 * 1000;
+const INTELLIGENCE_MIN_RISK_LEVEL_WORSENING_CHANGE_MS = 5 * 60 * 1000;
+
+const INTELLIGENCE_EARLY_RISK_CONFIRMATION_SNAPSHOTS = 3;
+const INTELLIGENCE_EARLY_RISK_WORSENING_CONFIRMATION_SNAPSHOTS = 2;
+const INTELLIGENCE_EARLY_RISK_EVALUATION_MS = 2 * 60 * 1000;
+const INTELLIGENCE_MIN_EARLY_RISK_CHANGE_MS = 10 * 60 * 1000;
+const INTELLIGENCE_MIN_EARLY_RISK_WORSENING_CHANGE_MS = 5 * 60 * 1000;
 
 const DASHBOARD_SIGNAL_CONFIRMATION_SNAPSHOTS = 2;
 const DASHBOARD_SIGNAL_EVALUATION_MS = 2 * 60 * 1000;
@@ -3777,7 +3973,8 @@ function buildIntelligenceModel(payload) {
     flowPulse.label
   );
   const riskState = applyRiskStateConfirmation(rawRiskState);
-  const riskLevel = intelGetRiskLevelDetailed(riskState, currentZone, stableBias.label, whaleSignal.label);
+  const rawRiskLevel = intelGetRiskLevelDetailed(riskState, currentZone, stableBias.label, whaleSignal.label);
+  const riskLevel = applyRiskLevelConfirmation(rawRiskLevel, riskState);
   const attractiveness = intelGetAttractivenessLabel(zoneScore);
   const shortTermRegime = intelGetShortTermRegime(change24h, buyPressure, sellPressure, whaleSignal.direction);
   const rawMediumTermRegime = intelGetMediumTermRegime(
@@ -3789,7 +3986,8 @@ function buildIntelligenceModel(payload) {
   );
   const mediumTermRegime = applyMediumTermRegimeConfirmation(rawMediumTermRegime);
   const longTermRegime = intelGetLongTermRegime(price, ma200w, currentZone);
-  const earlyRisk = intelGetEarlyRiskWarning(riskLevel, riskState, stableBias.label, whaleSignal.label, shortTermRegime, currentZone);
+  const rawEarlyRisk = intelGetEarlyRiskWarning(riskLevel, riskState, stableBias.label, whaleSignal.label, shortTermRegime, currentZone);
+  const earlyRisk = applyEarlyRiskConfirmation(rawEarlyRisk, riskLevel);
   const linkToMarket = intelGetLinkToMarket(riskLevel, currentZone, stableBias.label, earlyRisk.label);
   const zoneExplanation = intelGetZoneExplanation(currentZone);
   const intelligenceComment = intelGetIntelligenceComment(regime, stableBias.label, riskState, currentZone, zoneScore);
