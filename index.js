@@ -1202,10 +1202,18 @@ function calculateInvestorAttractiveness({
 }) {
   let score = 5;
 
+  const combinedFlow = average([flowScore, whaleScore, institutionalScore]);
+  const confirmedParticipation = Number.isFinite(combinedFlow) ? combinedFlow : 0;
+
   if (price <= deepValueUpper) {
-    score += 2.0;
+    score += confirmedParticipation < -25 ? 1.4 : 2.0;
   } else if (price <= accumulationUpper) {
-    score += 1.2;
+    score +=
+      confirmedParticipation < -25
+        ? 0.5
+        : confirmedParticipation < 0
+          ? 0.8
+          : 1.2;
   } else if (price <= fairValueUpper) {
     score += 0.3;
   } else if (price >= premiumUpper) {
@@ -1214,8 +1222,7 @@ function calculateInvestorAttractiveness({
     score -= 0.6;
   }
 
-  const combinedFlow = average([flowScore, whaleScore, institutionalScore]);
-  const participationBoost = clamp(combinedFlow / 35, -1.5, 1.5);
+  const participationBoost = clamp(confirmedParticipation / 35, -1.5, 1.5);
   score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.7 : participationBoost;
 
   const ch24 = Number(change24h);
@@ -1225,8 +1232,15 @@ function calculateInvestorAttractiveness({
     price > accumulationUpper &&
     price > deepValueUpper;
 
+  const cheapButUnconfirmed =
+    price <= accumulationUpper &&
+    confirmedParticipation < 0 &&
+    Number.isFinite(ch24) &&
+    ch24 <= 0.8;
+
   if (antiFomoActive) score -= 0.4;
   if (impulseWithoutValue) score -= 0.2;
+  if (cheapButUnconfirmed) score -= 0.3;
 
   return clamp(score, 1, 10);
 }
@@ -1945,10 +1959,27 @@ function buildDashboardFinalSignal(metrics) {
     cyclePosition = "Peak Risk";
   }
 
+  const structurallyCheap =
+    rangePos30 <= 28 &&
+    fearGreedValue <= 42 &&
+    rangePos90 < 68;
+
+  const weakCheapZone =
+    structure.trend === "Bearish" ||
+    structure.trend === "Weakening" ||
+    structure.liquidity === "Thin" ||
+    (structure.volatility === "High" && change24h <= 0) ||
+    (perf30d <= -4 && change24h <= 0);
+
+  const overheatedZone =
+    rangePos30 >= 74 ||
+    rangePos90 >= 86 ||
+    fearGreedValue >= 72;
+
   const marketState =
-    rangePos30 <= 28 && fearGreedValue <= 42
+    structurallyCheap && !weakCheapZone
       ? "Undervalued"
-      : rangePos30 >= 74 || fearGreedValue >= 72
+      : overheatedZone
         ? "Overheated"
         : "Fair Value";
 
