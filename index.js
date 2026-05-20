@@ -1205,25 +1205,22 @@ function calculateInvestorAttractiveness({
   const combinedFlow = average([flowScore, whaleScore, institutionalScore]);
   const confirmedParticipation = Number.isFinite(combinedFlow) ? combinedFlow : 0;
 
+  // Conservative valuation layer: cheap location helps, but it should not by itself
+  // turn Investor Attractiveness into a high reading without participation quality.
   if (price <= deepValueUpper) {
-    score += confirmedParticipation < -25 ? 1.4 : 2.0;
+    score += 1.4;
   } else if (price <= accumulationUpper) {
-    score +=
-      confirmedParticipation < -25
-        ? 0.5
-        : confirmedParticipation < 0
-          ? 0.8
-          : 1.2;
+    score += 0.7;
   } else if (price <= fairValueUpper) {
-    score += 0.3;
+    score += 0.1;
   } else if (price >= premiumUpper) {
     score -= 1.8;
   } else {
     score -= 0.6;
   }
 
-  const participationBoost = clamp(confirmedParticipation / 35, -1.5, 1.5);
-  score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.7 : participationBoost;
+  const participationBoost = clamp(confirmedParticipation / 50, -1.2, 0.7);
+  score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.55 : participationBoost;
 
   const ch24 = Number(change24h);
   const impulseWithoutValue =
@@ -1234,13 +1231,18 @@ function calculateInvestorAttractiveness({
 
   const cheapButUnconfirmed =
     price <= accumulationUpper &&
-    confirmedParticipation < 0 &&
+    confirmedParticipation < 15;
+
+  const cheapAndMomentumWeak =
+    price <= accumulationUpper &&
     Number.isFinite(ch24) &&
-    ch24 <= 0.8;
+    ch24 <= 0.8 &&
+    confirmedParticipation < 20;
 
   if (antiFomoActive) score -= 0.4;
   if (impulseWithoutValue) score -= 0.2;
-  if (cheapButUnconfirmed) score -= 0.3;
+  if (cheapButUnconfirmed) score -= 0.35;
+  if (cheapAndMomentumWeak) score -= 0.2;
 
   return clamp(score, 1, 10);
 }
