@@ -1205,22 +1205,23 @@ function calculateInvestorAttractiveness({
   const combinedFlow = average([flowScore, whaleScore, institutionalScore]);
   const confirmedParticipation = Number.isFinite(combinedFlow) ? combinedFlow : 0;
 
-  // Conservative valuation layer: cheap location helps, but it should not by itself
-  // turn Investor Attractiveness into a high reading without participation quality.
+  // Investor-first valuation layer: cheap price location helps, but it must not
+  // inflate attractiveness by itself when structure/participation is still unconfirmed.
   if (price <= deepValueUpper) {
-    score += 1.4;
+    score += 1.0;
   } else if (price <= accumulationUpper) {
-    score += 0.7;
+    score += 0.45;
   } else if (price <= fairValueUpper) {
-    score += 0.1;
+    score += 0.0;
   } else if (price >= premiumUpper) {
     score -= 1.8;
   } else {
     score -= 0.6;
   }
 
-  const participationBoost = clamp(confirmedParticipation / 50, -1.2, 0.7);
-  score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.55 : participationBoost;
+  // Participation can confirm value, but cannot dominate the score anymore.
+  const participationBoost = clamp(confirmedParticipation / 70, -1.2, 0.4);
+  score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.5 : participationBoost;
 
   const ch24 = Number(change24h);
   const impulseWithoutValue =
@@ -1231,18 +1232,18 @@ function calculateInvestorAttractiveness({
 
   const cheapButUnconfirmed =
     price <= accumulationUpper &&
-    confirmedParticipation < 15;
+    confirmedParticipation < 20;
 
   const cheapAndMomentumWeak =
     price <= accumulationUpper &&
     Number.isFinite(ch24) &&
     ch24 <= 0.8 &&
-    confirmedParticipation < 20;
+    confirmedParticipation < 25;
 
   if (antiFomoActive) score -= 0.4;
   if (impulseWithoutValue) score -= 0.2;
-  if (cheapButUnconfirmed) score -= 0.35;
-  if (cheapAndMomentumWeak) score -= 0.2;
+  if (cheapButUnconfirmed) score -= 0.45;
+  if (cheapAndMomentumWeak) score -= 0.25;
 
   return clamp(score, 1, 10);
 }
