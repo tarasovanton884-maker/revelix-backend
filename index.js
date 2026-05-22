@@ -1962,17 +1962,26 @@ function buildDashboardFinalSignal(metrics) {
     cyclePosition = "Peak Risk";
   }
 
+  const holderBehavior =
+    (perf30d > 0 && change24h <= 0) || (rangePos90 < 55 && fearGreedValue <= 40)
+      ? "Accumulating"
+      : (perf30d < 0 && change24h < 0) || (rangePos90 > 72 && fearGreedValue >= 68)
+        ? "Distributing"
+        : "Neutral";
+
   const structurallyCheap =
     rangePos30 <= 28 &&
     fearGreedValue <= 42 &&
     rangePos90 < 68;
 
-  const weakCheapZone =
+  const disqualifiedUndervalued =
+    holderBehavior === "Distributing" ||
     structure.trend === "Bearish" ||
     structure.trend === "Weakening" ||
     structure.liquidity === "Thin" ||
     (structure.volatility === "High" && change24h <= 0) ||
-    (perf30d <= -4 && change24h <= 0);
+    (perf30d <= -4 && change24h <= 0) ||
+    (cyclePosition === "Late Cycle" && holderBehavior !== "Accumulating" && structure.liquidity !== "Strong");
 
   const overheatedZone =
     rangePos30 >= 74 ||
@@ -1980,18 +1989,11 @@ function buildDashboardFinalSignal(metrics) {
     fearGreedValue >= 72;
 
   const marketState =
-    structurallyCheap && !weakCheapZone
+    structurallyCheap && !disqualifiedUndervalued
       ? "Undervalued"
       : overheatedZone
         ? "Overheated"
         : "Fair Value";
-
-  const holderBehavior =
-    (perf30d > 0 && change24h <= 0) || (rangePos90 < 55 && fearGreedValue <= 40)
-      ? "Accumulating"
-      : (perf30d < 0 && change24h < 0) || (rangePos90 > 72 && fearGreedValue >= 68)
-        ? "Distributing"
-        : "Neutral";
 
   const antiFomoActive =
     rangePos30 > 80 ||
