@@ -3946,9 +3946,40 @@ function intelGetShortTermRegime(change24h, buyPressure, sellPressure, whaleDire
 }
 
 function intelGetMediumTermRegime(zone, whaleDirection, zoneScore, stableBiasLabel, riskState) {
-  if ((zone === "Deep Value Zone" || zone === "Accumulation Zone") && whaleDirection === "Bullish" && stableBiasLabel === "Accumulation Bias") return "Accumulation Phase";
-  if (zoneScore >= 7 && stableBiasLabel === "Accumulation Bias" && riskState !== "Constructive but Fragile") return "Re-Accumulation";
-  if (zone === "Fair Value Zone" || stableBiasLabel === "Neutral Bias" || riskState === "Watchful Structure") return "Transition Phase";
+  const inValueZone = zone === "Deep Value Zone" || zone === "Accumulation Zone";
+  const confirmedAccumulation =
+    inValueZone &&
+    whaleDirection === "Bullish" &&
+    stableBiasLabel === "Accumulation Bias" &&
+    riskState !== "Constructive but Fragile";
+
+  if (confirmedAccumulation) return "Accumulation Phase";
+
+  if (
+    zoneScore >= 7 &&
+    stableBiasLabel === "Accumulation Bias" &&
+    whaleDirection === "Bullish" &&
+    riskState !== "Constructive but Fragile"
+  ) {
+    return "Re-Accumulation";
+  }
+
+  if (
+    inValueZone &&
+    (stableBiasLabel === "Accumulation Bias" || stableBiasLabel === "Neutral Bias")
+  ) {
+    return "Transition Phase";
+  }
+
+  if (
+    zone === "Fair Value Zone" ||
+    stableBiasLabel === "Neutral Bias" ||
+    riskState === "Watchful Structure" ||
+    riskState === "Constructive but Fragile"
+  ) {
+    return "Transition Phase";
+  }
+
   return "Distribution Phase";
 }
 
