@@ -2147,8 +2147,8 @@ const signal = applyDashboardSignalConfirmation(rawSignal);
   if (cyclePosition === "Peak Risk") entryRiskScore += 3;
 
   let entryRisk = "Low";
-  if (entryRiskScore >= 6) entryRisk = "High";
-  else if (entryRiskScore >= 3) entryRisk = "Medium";
+if (entryRiskScore >= 5) entryRisk = "High";
+else if (entryRiskScore >= 2) entryRisk = "Medium";
 
   if ((cyclePosition === "Late Cycle" || cyclePosition === "Peak Risk") && entryRisk === "Low") {
     entryRisk = "Medium";
