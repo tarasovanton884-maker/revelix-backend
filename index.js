@@ -2066,28 +2066,51 @@ function buildDashboardFinalSignal(metrics) {
 
   score = clamp(Math.round(score), 10, 98);
 
-  let rawSignal = scoreToDashboardSignal(score);
+ let rawSignal = scoreToDashboardSignal(score);
 
-  if (rawSignal === "Strong Buy" && (antiFomoActive || structure.liquidity !== "Strong" || cyclePosition !== "Early Cycle")) {
-    rawSignal = "Buy";
-  }
-  if (rawSignal === "Buy" && (antiFomoActive || structure.trend !== "Bullish" || cyclePosition === "Late Cycle" || cyclePosition === "Peak Risk")) {
-    rawSignal = score >= 58 ? "Constructive" : "Caution";
-  }
-  if (
-    rawSignal === "Constructive" &&
-    (cyclePosition === "Peak Risk" ||
-      (cyclePosition === "Late Cycle" && structure.liquidity !== "Strong" && marketState !== "Undervalued"))
-  ) {
-    rawSignal = "Caution";
-  }
-  if ((rawSignal === "Constructive" || rawSignal === "Caution") && (structure.trend === "Bearish" || marketState === "Overheated")) {
-    rawSignal = score >= 42 ? "Caution" : "Risk-Off";
-  }
+if (rawSignal === "Strong Buy" && (antiFomoActive || structure.liquidity !== "Strong" || cyclePosition !== "Early Cycle")) {
+  rawSignal = "Buy";
+}
 
-  const signal = applyDashboardSignalConfirmation(rawSignal);
+if (
+  rawSignal === "Buy" &&
+  (
+    antiFomoActive ||
+    structure.trend !== "Bullish" ||
+    cyclePosition !== "Early Cycle" ||
+    marketState !== "Undervalued"
+  )
+) {
+  rawSignal = score >= 58 ? "Constructive" : "Caution";
+}
 
-  let confidence = 46;
+const macroSignalCap =
+  cyclePosition === "Late Cycle" ||
+  cyclePosition === "Peak Risk" ||
+  marketState === "Overheated" ||
+  holderBehavior === "Distributing";
+
+const weakStructureCap =
+  structure.trend === "Bearish" ||
+  structure.trend === "Weakening" ||
+  structure.liquidity === "Thin";
+
+const notAsymmetricInvestorSetup =
+  marketState !== "Undervalued" &&
+  cyclePosition !== "Early Cycle" &&
+  structure.trend !== "Bullish";
+
+if (rawSignal === "Constructive" && (macroSignalCap || weakStructureCap || notAsymmetricInvestorSetup)) {
+  rawSignal = "Caution";
+}
+
+if ((rawSignal === "Constructive" || rawSignal === "Caution") && (structure.trend === "Bearish" || marketState === "Overheated")) {
+  rawSignal = score >= 42 ? "Caution" : "Risk-Off";
+}
+
+const signal = applyDashboardSignalConfirmation(rawSignal);
+  
+ let confidence = 46;
   const alignmentCount = [
     structure.trend === "Bullish" || structure.trend === "Recovery",
     structure.liquidity === "Strong" || structure.liquidity === "Supportive",
