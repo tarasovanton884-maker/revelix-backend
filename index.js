@@ -1974,6 +1974,34 @@ function buildDashboardFinalSignal(metrics) {
     fearGreedValue <= 42 &&
     rangePos90 < 68;
 
+  // Undervalued should be a high-quality macro/value read, not just "lower part
+  // of the recent range". This prevents Fair Value <-> Undervalued flips when
+  // price is similar but structure is only mixed or not yet confirmed.
+  const deepDiscountZone =
+    rangePos30 <= 18 &&
+    rangePos90 < 55 &&
+    fearGreedValue <= 35;
+
+  const confirmedValueZone =
+    rangePos30 <= 24 &&
+    rangePos90 < 58 &&
+    fearGreedValue <= 38 &&
+    holderBehavior === "Accumulating" &&
+    (structure.liquidity === "Supportive" || structure.liquidity === "Strong") &&
+    (structure.trend === "Recovery" || structure.trend === "Range") &&
+    structure.volatility !== "High";
+
+  const capitulationValueZone =
+    rangePos30 <= 16 &&
+    rangePos90 < 60 &&
+    fearGreedValue <= 30 &&
+    perf30d <= -6 &&
+    structure.liquidity !== "Thin";
+
+  const undervaluedCandidate =
+    structurallyCheap &&
+    (deepDiscountZone || confirmedValueZone || capitulationValueZone);
+
   const disqualifiedUndervalued =
     holderBehavior === "Distributing" ||
     structure.trend === "Bearish" ||
@@ -1981,7 +2009,8 @@ function buildDashboardFinalSignal(metrics) {
     structure.liquidity === "Thin" ||
     (structure.volatility === "High" && change24h <= 0) ||
     (perf30d <= -4 && change24h <= 0) ||
-    (cyclePosition === "Late Cycle" && holderBehavior !== "Accumulating" && structure.liquidity !== "Strong");
+    (cyclePosition === "Late Cycle" && holderBehavior !== "Accumulating" && structure.liquidity !== "Strong") ||
+    (cyclePosition === "Mid Cycle" && structure.liquidity === "Neutral" && structure.trend !== "Recovery");
 
   const overheatedZone =
     rangePos30 >= 74 ||
@@ -1989,7 +2018,7 @@ function buildDashboardFinalSignal(metrics) {
     fearGreedValue >= 72;
 
   const marketState =
-    structurallyCheap && !disqualifiedUndervalued
+    undervaluedCandidate && !disqualifiedUndervalued
       ? "Undervalued"
       : overheatedZone
         ? "Overheated"
