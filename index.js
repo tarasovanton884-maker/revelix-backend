@@ -2337,17 +2337,17 @@ function buildDashboardMarketClarity(signal) {
     description = "Market is choppy. Signals are less reliable. Wait for confirmation.";
   }
 
-  let clarityScore = 38;
-  clarityScore += stabilityScore * 14;
-  clarityScore += investorScore * 10;
-  clarityScore += antiFomoScore === 2 ? 10 : 0;
-  clarityScore += trapRisk === "Low" ? 10 : trapRisk === "Medium" ? 4 : -6;
-  clarityScore += signal.confidence >= 75 ? 8 : signal.confidence >= 62 ? 4 : 0;
-  clarityScore = clamp(Math.round(clarityScore), 28, 92);
+let clarityScore = 36;
+clarityScore += stabilityScore * 10;
+clarityScore += investorScore * 8;
+clarityScore += antiFomoScore === 2 ? 6 : 0;
+clarityScore += trapRisk === "Low" ? 6 : trapRisk === "Medium" ? 2 : -8;
+clarityScore += signal.confidence >= 75 ? 4 : signal.confidence >= 62 ? 2 : 0;
+clarityScore = clamp(Math.round(clarityScore), 28, 92);
 
-  if (level === "Low") clarityScore = clamp(clarityScore, 28, 55);
-  if (level === "Medium") clarityScore = clamp(clarityScore, 46, 78);
-  if (level === "High") clarityScore = clamp(clarityScore, 68, 92);
+if (level === "Low") clarityScore = clamp(clarityScore, 28, 55);
+if (level === "Medium") clarityScore = clamp(clarityScore, 44, 74);
+if (level === "High") clarityScore = clamp(clarityScore, 64, 92);
 
   return {
     level,
