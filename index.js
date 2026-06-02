@@ -1016,7 +1016,8 @@ function applyMediumTermRegimeConfirmation(candidateRegime, now = Date.now()) {
   const currentRank = getMediumTermRegimeRank(currentStable);
   const candidateRank = getMediumTermRegimeRank(candidateRegime);
 
-  // Deterioration can update faster, but still one step at a time so medium-term does not whip around.
+  // Deterioration can update immediately, one step at a time.
+  // Improvement from Distribution must be earned by time, not one slightly better flow snapshot.
   if (candidateRank < currentRank) {
     const nextRank = Math.max(currentRank - 1, candidateRank);
     const nextRegime = getMediumTermRegimeByRank(nextRank);
@@ -1048,10 +1049,14 @@ function applyMediumTermRegimeConfirmation(candidateRegime, now = Date.now()) {
     INTELLIGENCE_STATE.pendingMediumTermRegimeCount = 1;
   }
 
+  const improvingFromDistribution = currentStable === "Distribution Phase" && candidateRank > currentRank;
+  const requiredSnapshots = improvingFromDistribution ? 12 : MEDIUM_TERM_REGIME_CONFIRMATION_SNAPSHOTS;
+  const requiredTime = improvingFromDistribution ? 3 * 60 * 60 * 1000 : MEDIUM_TERM_MIN_REGIME_CHANGE_MS;
+
   const enoughSnapshots =
-    INTELLIGENCE_STATE.pendingMediumTermRegimeCount >= MEDIUM_TERM_REGIME_CONFIRMATION_SNAPSHOTS;
+    INTELLIGENCE_STATE.pendingMediumTermRegimeCount >= requiredSnapshots;
   const enoughTime =
-    now - (INTELLIGENCE_STATE.lastMediumTermRegimeCommitAt || 0) >= MEDIUM_TERM_MIN_REGIME_CHANGE_MS;
+    now - (INTELLIGENCE_STATE.lastMediumTermRegimeCommitAt || 0) >= requiredTime;
 
   if (enoughSnapshots && enoughTime) {
     const nextRank = Math.min(currentRank + 1, candidateRank);
@@ -1212,7 +1217,16 @@ function updateStableInvestorAttractiveness(rawScore, now = Date.now()) {
   const raw = clamp(Number(rawScore.toFixed(1)), 1, 10);
 
   if (!Number.isFinite(INTELLIGENCE_STATE.stableAttractiveness) || INTELLIGENCE_STATE.stableAttractiveness <= 0) {
-    const initial = Number.isFinite(cached) ? cached : raw;
+    let initial = Number.isFinite(cached) ? cached : raw;
+
+    // Avoid booting from a stale over-hot cache after a deploy. Keep smoothing,
+    // but do not let an old 7-8 reading survive if the current raw setup is lower.
+    if (Number.isFinite(cached) && cached > raw + 0.6) {
+      initial = raw + 0.3;
+    } else if (Number.isFinite(cached) && cached < raw - 0.8) {
+      initial = raw - 0.3;
+    }
+
     INTELLIGENCE_STATE.stableAttractiveness = clamp(Number(initial.toFixed(1)), 1, 10);
     INTELLIGENCE_STATE.lastAttractivenessCommitAt = now;
     setCachedInvestorAttractiveness(INTELLIGENCE_STATE.stableAttractiveness);
@@ -1288,7 +1302,7 @@ function calculateInvestorAttractiveness({
       score += 0.7;
     }
   } else if (inAccumulationValue) {
-    score += 1.35;
+    score += 1.05;
   } else if (price <= fairValueUpper) {
     score += 0.0;
   } else if (price >= premiumUpper) {
@@ -1312,7 +1326,7 @@ function calculateInvestorAttractiveness({
   if (inDeepValue) {
     participationBoost = clamp(participationBoost, -0.25, 1.2);
   } else if (inAccumulationValue) {
-    participationBoost = clamp(participationBoost, -0.45, 1.0);
+    participationBoost = clamp(participationBoost, -0.45, 0.75);
   }
 
   score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.5 : participationBoost;
@@ -1321,8 +1335,8 @@ function calculateInvestorAttractiveness({
     score += 0.6;
   }
 
-  if (inAccumulationValue && confirmedParticipation >= 28 && !antiFomoActive) {
-    score += 0.35;
+  if (inAccumulationValue && confirmedParticipation >= 32 && !antiFomoActive) {
+    score += 0.2;
   }
 
   const ch24 = Number(change24h);
@@ -1332,7 +1346,7 @@ function calculateInvestorAttractiveness({
     (inDeepValue || inAccumulationValue);
 
   if (downsideCapitulationInValue && !antiFomoActive) {
-    score += inDeepValue ? 0.45 : 0.25;
+    score += inDeepValue ? 0.45 : 0.15;
   }
 
   const impulseWithoutValue =
@@ -4089,10 +4103,19 @@ function intelGetMediumTermRegime(
   shortTermRegime = "Neutral"
 ) {
   const inValueZone = zone === "Deep Value Zone" || zone === "Accumulation Zone";
+  const isAccumulationZone = zone === "Accumulation Zone";
+  const isDeepValueZone = zone === "Deep Value Zone";
   const bearishPressure =
     flowPulseLabel === "Bearish Pulse" ||
     shortTermRegime === "Bearish" ||
     whaleDirection === "Bearish";
+
+  const bullishRecoveryQuality =
+    stableBiasLabel === "Accumulation Bias" &&
+    whaleDirection === "Bullish" &&
+    flowPulseLabel !== "Bearish Pulse" &&
+    shortTermRegime !== "Bearish" &&
+    riskState === "Accumulation Opportunity";
 
   const confirmedBearishDeterioration =
     bearishPressure &&
@@ -4102,52 +4125,42 @@ function intelGetMediumTermRegime(
       riskState === "Watchful Structure" ||
       riskState === "Constructive but Fragile"
     ) &&
-    zoneScore < 5.4;
+    zoneScore < 5.8;
 
   const severeBearishDeterioration =
     (flowPulseLabel === "Bearish Pulse" && shortTermRegime === "Bearish") ||
     (whaleDirection === "Bearish" && shortTermRegime === "Bearish");
 
-  const valueZoneMarkdownPressure =
-    zone === "Accumulation Zone" &&
-    stableBiasLabel !== "Accumulation Bias" &&
-    whaleDirection !== "Bullish" &&
+  // Main defensive rule: in Accumulation Zone, a bearish short-term layer should
+  // not be neutralized just because valuation/attractiveness improved. It can
+  // only relax after real accumulation recovery appears.
+  const accumulationZoneDefensiveBreak =
+    isAccumulationZone &&
     shortTermRegime === "Bearish" &&
+    !bullishRecoveryQuality &&
     (
       flowPulseLabel === "Bearish Pulse" ||
+      whaleDirection !== "Bullish" ||
       riskState === "Constructive but Fragile" ||
       riskState === "Watchful Structure" ||
-      riskState === "Elevated Risk"
-    ) &&
-    zoneScore <= 6.8;
-
-  // Holds medium-term deterioration after it appears. A small improvement in
-  // attractiveness/participation inside Accumulation Zone should not immediately
-  // flip the medium layer back to Transition while short-term structure is still
-  // Bearish. This keeps Medium-Term from bouncing every 1-2 hours.
-  const valueZoneDistributionHold =
-    zone === "Accumulation Zone" &&
-    stableBiasLabel !== "Accumulation Bias" &&
-    whaleDirection !== "Bullish" &&
-    shortTermRegime === "Bearish" &&
-    zoneScore <= 7.4 &&
-    (
-      flowPulseLabel === "Bearish Pulse" ||
-      riskState !== "Accumulation Opportunity"
+      riskState === "Elevated Risk" ||
+      zoneScore <= 7.1
     );
 
-  // Medium-term should not get stuck in Transition when price is inside a value
-  // zone but live structure has clearly shifted into bearish/markdown pressure.
-  // Deep Value is still protected from instant Distribution unless deterioration
-  // is severe, because macro-bottom zones often look ugly before they stabilize.
+  const deepValuePanicBreak =
+    isDeepValueZone &&
+    severeBearishDeterioration &&
+    stableBiasLabel !== "Accumulation Bias" &&
+    riskState !== "Accumulation Opportunity";
+
   if (
-    (confirmedBearishDeterioration || valueZoneMarkdownPressure || valueZoneDistributionHold) &&
+    confirmedBearishDeterioration ||
+    accumulationZoneDefensiveBreak ||
+    deepValuePanicBreak ||
     (
-      zone === "Fair Value Zone" ||
-      zone === "Premium Zone" ||
-      zone === "Overheated Zone" ||
-      zone === "Accumulation Zone" ||
-      (zone === "Deep Value Zone" && severeBearishDeterioration && stableBiasLabel !== "Accumulation Bias")
+      bearishPressure &&
+      !inValueZone &&
+      riskState !== "Accumulation Opportunity"
     )
   ) {
     return "Distribution Phase";
@@ -4155,27 +4168,22 @@ function intelGetMediumTermRegime(
 
   const confirmedAccumulation =
     inValueZone &&
-    whaleDirection === "Bullish" &&
-    stableBiasLabel === "Accumulation Bias" &&
-    riskState !== "Constructive but Fragile" &&
-    !bearishPressure;
+    bullishRecoveryQuality;
 
   if (confirmedAccumulation) return "Accumulation Phase";
 
   if (
-    zoneScore >= 7 &&
+    zoneScore >= 7.4 &&
     stableBiasLabel === "Accumulation Bias" &&
     whaleDirection === "Bullish" &&
-    riskState !== "Constructive but Fragile" &&
-    !bearishPressure
+    flowPulseLabel !== "Bearish Pulse" &&
+    shortTermRegime !== "Bearish" &&
+    riskState === "Accumulation Opportunity"
   ) {
     return "Re-Accumulation";
   }
 
-  if (
-    inValueZone &&
-    (stableBiasLabel === "Accumulation Bias" || stableBiasLabel === "Neutral Bias")
-  ) {
+  if (inValueZone) {
     return "Transition Phase";
   }
 
