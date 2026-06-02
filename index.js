@@ -1292,17 +1292,17 @@ function calculateInvestorAttractiveness({
   // attractive for long-term investors, while still requiring participation
   // quality before it can reach the highest scores.
   if (inDeepValue) {
-    score += 1.8;
+    score += 1.4;
 
     if (Number.isFinite(priceToDeepValue) && priceToDeepValue <= 0.92) {
-      score += 0.8;
+      score += 0.5;
     }
 
     if (Number.isFinite(priceToDeepValue) && priceToDeepValue <= 0.85) {
-      score += 0.7;
+      score += 0.4;
     }
   } else if (inAccumulationValue) {
-    score += 1.05;
+    score += 0.85;
   } else if (price <= fairValueUpper) {
     score += 0.0;
   } else if (price >= premiumUpper) {
@@ -1313,9 +1313,9 @@ function calculateInvestorAttractiveness({
 
   if (Number.isFinite(ma200w) && ma200w > 0 && Number.isFinite(price)) {
     if (price <= ma200w * 0.95) {
-      score += 0.95;
+      score += 0.75;
     } else if (price <= ma200w * 1.05) {
-      score += 0.55;
+      score += 0.45;
     }
   }
 
@@ -1332,11 +1332,11 @@ function calculateInvestorAttractiveness({
   score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.5 : participationBoost;
 
   if (inDeepValue && confirmedParticipation >= 35 && !antiFomoActive) {
-    score += 0.6;
+    score += 0.35;
   }
 
   if (inAccumulationValue && confirmedParticipation >= 32 && !antiFomoActive) {
-    score += 0.2;
+    score += 0.10;
   }
 
   const ch24 = Number(change24h);
