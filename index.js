@@ -4121,12 +4121,27 @@ function intelGetMediumTermRegime(
     ) &&
     zoneScore <= 6.8;
 
+  // Holds medium-term deterioration after it appears. A small improvement in
+  // attractiveness/participation inside Accumulation Zone should not immediately
+  // flip the medium layer back to Transition while short-term structure is still
+  // Bearish. This keeps Medium-Term from bouncing every 1-2 hours.
+  const valueZoneDistributionHold =
+    zone === "Accumulation Zone" &&
+    stableBiasLabel !== "Accumulation Bias" &&
+    whaleDirection !== "Bullish" &&
+    shortTermRegime === "Bearish" &&
+    zoneScore <= 7.4 &&
+    (
+      flowPulseLabel === "Bearish Pulse" ||
+      riskState !== "Accumulation Opportunity"
+    );
+
   // Medium-term should not get stuck in Transition when price is inside a value
   // zone but live structure has clearly shifted into bearish/markdown pressure.
   // Deep Value is still protected from instant Distribution unless deterioration
   // is severe, because macro-bottom zones often look ugly before they stabilize.
   if (
-    (confirmedBearishDeterioration || valueZoneMarkdownPressure) &&
+    (confirmedBearishDeterioration || valueZoneMarkdownPressure || valueZoneDistributionHold) &&
     (
       zone === "Fair Value Zone" ||
       zone === "Premium Zone" ||
