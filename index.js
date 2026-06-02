@@ -1199,16 +1199,29 @@ function calculateInvestorAttractiveness({
   whaleScore,
   institutionalScore,
   antiFomoActive = false,
+  ma200w = null,
 }) {
   let score = 5;
 
   const combinedFlow = average([flowScore, whaleScore, institutionalScore]);
   const confirmedParticipation = Number.isFinite(combinedFlow) ? combinedFlow : 0;
+  const priceToDeepValue =
+    Number.isFinite(price) && Number.isFinite(deepValueUpper) && deepValueUpper > 0
+      ? price / deepValueUpper
+      : null;
 
-  // Investor-first valuation layer: cheap price location helps, but it must not
-  // inflate attractiveness by itself when structure/participation is still unconfirmed.
+  // Investor-first valuation layer. Accumulation helps modestly, but true
+  // macro-bottom/deep-value conditions can lift attractiveness meaningfully.
   if (price <= deepValueUpper) {
-    score += 1.0;
+    score += 1.2;
+
+    if (Number.isFinite(priceToDeepValue) && priceToDeepValue <= 0.92) {
+      score += 0.6;
+    }
+
+    if (Number.isFinite(priceToDeepValue) && priceToDeepValue <= 0.85) {
+      score += 0.5;
+    }
   } else if (price <= accumulationUpper) {
     score += 0.45;
   } else if (price <= fairValueUpper) {
@@ -1219,9 +1232,22 @@ function calculateInvestorAttractiveness({
     score -= 0.6;
   }
 
-  // Participation can confirm value, but cannot dominate the score anymore.
-  const participationBoost = clamp(confirmedParticipation / 70, -1.2, 0.4);
+  if (Number.isFinite(ma200w) && ma200w > 0 && Number.isFinite(price)) {
+    if (price <= ma200w * 0.95) {
+      score += 0.8;
+    } else if (price <= ma200w * 1.05) {
+      score += 0.45;
+    }
+  }
+
+  // Participation confirms value. It is still capped, but no longer capped so
+  // low that macro-bottom conditions can never become highly attractive.
+  const participationBoost = clamp(confirmedParticipation / 65, -1.2, 0.9);
   score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.5 : participationBoost;
+
+  if (price <= deepValueUpper && confirmedParticipation >= 35 && !antiFomoActive) {
+    score += 0.4;
+  }
 
   const ch24 = Number(change24h);
   const impulseWithoutValue =
@@ -1242,8 +1268,8 @@ function calculateInvestorAttractiveness({
 
   if (antiFomoActive) score -= 0.4;
   if (impulseWithoutValue) score -= 0.2;
-  if (cheapButUnconfirmed) score -= 0.45;
-  if (cheapAndMomentumWeak) score -= 0.25;
+  if (cheapButUnconfirmed) score -= price <= deepValueUpper ? 0.25 : 0.45;
+  if (cheapAndMomentumWeak) score -= price <= deepValueUpper ? 0.15 : 0.25;
 
   return clamp(score, 1, 10);
 }
@@ -2868,7 +2894,7 @@ function getIntelligenceLink(phase, currentZone) {
         currentZone === "Deep Value Zone" ||
         currentZone === "Accumulation Zone") {
         return [
-            "Confirm that Risk Level remains constructive.",
+            "Confirm that Risk Level is not deteriorating.",
             "Check whether Investor Attractiveness stays strong.",
             "Watch if Investor Bias starts leaning toward accumulation.",
         ];
@@ -3968,13 +3994,56 @@ function intelGetShortTermRegime(change24h, buyPressure, sellPressure, whaleDire
   return "Neutral";
 }
 
-function intelGetMediumTermRegime(zone, whaleDirection, zoneScore, stableBiasLabel, riskState) {
+function intelGetMediumTermRegime(
+  zone,
+  whaleDirection,
+  zoneScore,
+  stableBiasLabel,
+  riskState,
+  flowPulseLabel = "Neutral Pulse",
+  shortTermRegime = "Neutral"
+) {
   const inValueZone = zone === "Deep Value Zone" || zone === "Accumulation Zone";
+  const bearishPressure =
+    flowPulseLabel === "Bearish Pulse" ||
+    shortTermRegime === "Bearish" ||
+    whaleDirection === "Bearish";
+
+  const confirmedBearishDeterioration =
+    bearishPressure &&
+    (
+      riskState === "Elevated Risk" ||
+      riskState === "Late Pump Risk" ||
+      riskState === "Watchful Structure" ||
+      riskState === "Constructive but Fragile"
+    ) &&
+    zoneScore < 5.4;
+
+  const severeBearishDeterioration =
+    (flowPulseLabel === "Bearish Pulse" && shortTermRegime === "Bearish") ||
+    (whaleDirection === "Bearish" && shortTermRegime === "Bearish");
+
+  // Medium-term should not get stuck in Transition when price is inside a value
+  // zone but live structure has clearly shifted into bearish/markdown pressure.
+  if (
+    confirmedBearishDeterioration &&
+    (
+      zone === "Fair Value Zone" ||
+      zone === "Premium Zone" ||
+      zone === "Overheated Zone" ||
+      zone === "Accumulation Zone" ||
+      (zone === "Deep Value Zone" && severeBearishDeterioration && stableBiasLabel !== "Accumulation Bias")
+    )
+  ) {
+    return "Distribution Phase";
+  }
+
   const confirmedAccumulation =
     inValueZone &&
     whaleDirection === "Bullish" &&
     stableBiasLabel === "Accumulation Bias" &&
-    riskState !== "Constructive but Fragile";
+    riskState !== "Constructive but Fragile" &&
+    !bearishPressure;
 
   if (confirmedAccumulation) return "Accumulation Phase";
 
@@ -3982,7 +4051,8 @@ function intelGetMediumTermRegime(zone, whaleDirection, zoneScore, stableBiasLab
     zoneScore >= 7 &&
     stableBiasLabel === "Accumulation Bias" &&
     whaleDirection === "Bullish" &&
-    riskState !== "Constructive but Fragile"
+    riskState !== "Constructive but Fragile" &&
+    !bearishPressure
   ) {
     return "Re-Accumulation";
   }
@@ -4101,7 +4171,9 @@ function buildIntelligenceModel(payload) {
     whaleSignal.direction,
     zoneScore,
     stableBias.label,
-    riskState
+    riskState,
+    flowPulse.label,
+    shortTermRegime
   );
   const mediumTermRegime = applyMediumTermRegimeConfirmation(rawMediumTermRegime);
   const longTermRegime = intelGetLongTermRegime(price, ma200w, currentZone);
@@ -4291,6 +4363,7 @@ const dataHealth = getDataHealth([
     whaleScore,
     institutionalScore,
     antiFomoActive: intelligenceAntiFomoActive,
+    ma200w,
   });
 
   const candidateBias = determineInvestorBiasCandidate({
