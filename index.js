@@ -1,6 +1,8 @@
 const express = require("express");
 const cors = require("cors");
 const { createClient } = require("@supabase/supabase-js");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,6 +13,10 @@ app.use(express.json());
 const CACHE = new Map();
 const INFLIGHT = new Map();
 let LAST_GOOD_TICKER = null;
+const ATTRACTIVENESS_CACHE_FILE =
+  process.env.ATTRACTIVENESS_CACHE_FILE ||
+  path.join(process.env.RENDER_DISK_MOUNT_PATH || "/tmp", "revelix_attractiveness_cache.json");
+
 
 function isValidTicker(ticker) {
   const price = Number(ticker?.lastPrice);
@@ -1131,16 +1137,67 @@ function updateStableBiasConfidence(targetConfidence, now = Date.now()) {
   return next;
 }
 
+function readPersistentInvestorAttractiveness() {
+  try {
+    if (!ATTRACTIVENESS_CACHE_FILE || !fs.existsSync(ATTRACTIVENESS_CACHE_FILE)) return null;
+
+    const parsed = JSON.parse(fs.readFileSync(ATTRACTIVENESS_CACHE_FILE, "utf8"));
+    const value = Number(parsed?.value);
+    const savedAt = Number(parsed?.savedAt);
+
+    if (!Number.isFinite(value) || value < 1 || value > 10) return null;
+    if (Number.isFinite(savedAt) && Date.now() - savedAt > INTELLIGENCE_ATTRACTIVENESS_CACHE_TTL) return null;
+
+    return Number(value.toFixed(1));
+  } catch (error) {
+    console.warn("Failed to read persistent attractiveness cache:", error.message);
+    return null;
+  }
+}
+
+function writePersistentInvestorAttractiveness(value) {
+  try {
+    if (!ATTRACTIVENESS_CACHE_FILE) return;
+
+    const normalized = Number(value);
+    if (!Number.isFinite(normalized) || normalized < 1 || normalized > 10) return;
+
+    fs.mkdirSync(path.dirname(ATTRACTIVENESS_CACHE_FILE), { recursive: true });
+    fs.writeFileSync(
+      ATTRACTIVENESS_CACHE_FILE,
+      JSON.stringify({ value: Number(normalized.toFixed(1)), savedAt: Date.now() }),
+      "utf8"
+    );
+  } catch (error) {
+    console.warn("Failed to write persistent attractiveness cache:", error.message);
+  }
+}
+
 function getCachedInvestorAttractiveness() {
   const cached = getCache("last_good_investor_attractiveness", true);
   const value = Number(cached);
-  return Number.isFinite(value) && value >= 1 && value <= 10 ? value : null;
+
+  if (Number.isFinite(value) && value >= 1 && value <= 10) {
+    return Number(value.toFixed(1));
+  }
+
+  const persistent = readPersistentInvestorAttractiveness();
+
+  if (Number.isFinite(persistent)) {
+    setCache("last_good_investor_attractiveness", persistent, INTELLIGENCE_ATTRACTIVENESS_CACHE_TTL);
+    return persistent;
+  }
+
+  return null;
 }
 
 function setCachedInvestorAttractiveness(value) {
   const normalized = Number(value);
   if (!Number.isFinite(normalized) || normalized < 1 || normalized > 10) return;
-  setCache("last_good_investor_attractiveness", Number(normalized.toFixed(1)), INTELLIGENCE_ATTRACTIVENESS_CACHE_TTL);
+
+  const rounded = Number(normalized.toFixed(1));
+  setCache("last_good_investor_attractiveness", rounded, INTELLIGENCE_ATTRACTIVENESS_CACHE_TTL);
+  writePersistentInvestorAttractiveness(rounded);
 }
 
 function updateStableInvestorAttractiveness(rawScore, now = Date.now()) {
@@ -1210,20 +1267,28 @@ function calculateInvestorAttractiveness({
       ? price / deepValueUpper
       : null;
 
-  // Investor-first valuation layer. Accumulation helps modestly, but true
-  // macro-bottom/deep-value conditions can lift attractiveness meaningfully.
-  if (price <= deepValueUpper) {
-    score += 1.2;
+  const inDeepValue = Number.isFinite(price) && Number.isFinite(deepValueUpper) && price <= deepValueUpper;
+  const inAccumulationValue =
+    Number.isFinite(price) &&
+    Number.isFinite(accumulationUpper) &&
+    price <= accumulationUpper &&
+    !inDeepValue;
+
+  // Investor-first valuation layer. A sell-off inside value should become more
+  // attractive for long-term investors, while still requiring participation
+  // quality before it can reach the highest scores.
+  if (inDeepValue) {
+    score += 1.8;
 
     if (Number.isFinite(priceToDeepValue) && priceToDeepValue <= 0.92) {
-      score += 0.6;
+      score += 0.8;
     }
 
     if (Number.isFinite(priceToDeepValue) && priceToDeepValue <= 0.85) {
-      score += 0.5;
+      score += 0.7;
     }
-  } else if (price <= accumulationUpper) {
-    score += 0.45;
+  } else if (inAccumulationValue) {
+    score += 1.35;
   } else if (price <= fairValueUpper) {
     score += 0.0;
   } else if (price >= premiumUpper) {
@@ -1234,22 +1299,42 @@ function calculateInvestorAttractiveness({
 
   if (Number.isFinite(ma200w) && ma200w > 0 && Number.isFinite(price)) {
     if (price <= ma200w * 0.95) {
-      score += 0.8;
+      score += 0.95;
     } else if (price <= ma200w * 1.05) {
-      score += 0.45;
+      score += 0.55;
     }
   }
 
-  // Participation confirms value. It is still capped, but no longer capped so
-  // low that macro-bottom conditions can never become highly attractive.
-  const participationBoost = clamp(confirmedParticipation / 65, -1.2, 0.9);
+  // Participation confirms value, but negative short-term flow should not fully
+  // erase long-term value inside accumulation/deep-value zones.
+  let participationBoost = clamp(confirmedParticipation / 60, -1.2, 1.2);
+
+  if (inDeepValue) {
+    participationBoost = clamp(participationBoost, -0.25, 1.2);
+  } else if (inAccumulationValue) {
+    participationBoost = clamp(participationBoost, -0.45, 1.0);
+  }
+
   score += antiFomoActive && participationBoost > 0 ? participationBoost * 0.5 : participationBoost;
 
-  if (price <= deepValueUpper && confirmedParticipation >= 35 && !antiFomoActive) {
-    score += 0.4;
+  if (inDeepValue && confirmedParticipation >= 35 && !antiFomoActive) {
+    score += 0.6;
+  }
+
+  if (inAccumulationValue && confirmedParticipation >= 28 && !antiFomoActive) {
+    score += 0.35;
   }
 
   const ch24 = Number(change24h);
+  const downsideCapitulationInValue =
+    Number.isFinite(ch24) &&
+    ch24 <= -2.8 &&
+    (inDeepValue || inAccumulationValue);
+
+  if (downsideCapitulationInValue && !antiFomoActive) {
+    score += inDeepValue ? 0.45 : 0.25;
+  }
+
   const impulseWithoutValue =
     Number.isFinite(ch24) &&
     ch24 >= 2.2 &&
@@ -1268,8 +1353,8 @@ function calculateInvestorAttractiveness({
 
   if (antiFomoActive) score -= 0.4;
   if (impulseWithoutValue) score -= 0.2;
-  if (cheapButUnconfirmed) score -= price <= deepValueUpper ? 0.25 : 0.45;
-  if (cheapAndMomentumWeak) score -= price <= deepValueUpper ? 0.15 : 0.25;
+  if (cheapButUnconfirmed) score -= inDeepValue ? 0.1 : 0.2;
+  if (cheapAndMomentumWeak) score -= inDeepValue ? 0.05 : 0.1;
 
   return clamp(score, 1, 10);
 }
