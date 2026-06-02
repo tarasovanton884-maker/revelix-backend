@@ -4047,9 +4047,9 @@ function intelGetRiskLevelDetailed(riskState, currentZone, stableBiasLabel, whal
 
 function intelGetAttractivenessBreakdown(price, ma200w, riskLevel, currentZone, stableBiasLabel, whaleLabel) {
   let structureScore = 0, riskScore = 0, momentumScore = 0, rangeScore = 0, participationScore = 0;
-  if (currentZone === "Deep Value Zone") structureScore = 4.2;
-  if (currentZone === "Accumulation Zone") structureScore = 3.1;
-  if (currentZone === "Fair Value Zone") structureScore = 1.8;
+  if (currentZone === "Deep Value Zone") structureScore = 3.6;
+  if (currentZone === "Accumulation Zone") structureScore = 2.8;
+  if (currentZone === "Fair Value Zone") structureScore = 1.7;
   if (currentZone === "Premium Zone") structureScore = 0.7;
   if (currentZone === "Overheated Zone") structureScore = 0.2;
   if (riskLevel === "Low Risk") riskScore = 2.0;
