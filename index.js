@@ -4153,10 +4153,28 @@ function intelGetMediumTermRegime(
     stableBiasLabel !== "Accumulation Bias" &&
     riskState !== "Accumulation Opportunity";
 
+  // Deep Value is attractive long-term, but it is not medium-term recovery by itself.
+  // If short-term is still Bearish and there is no real accumulation recovery,
+  // keep medium-term defensive instead of relaxing back to Transition from valuation alone.
+  const deepValueDefensiveBreak =
+    isDeepValueZone &&
+    shortTermRegime === "Bearish" &&
+    !bullishRecoveryQuality &&
+    riskState !== "Accumulation Opportunity" &&
+    (
+      flowPulseLabel === "Bearish Pulse" ||
+      whaleDirection !== "Bullish" ||
+      riskState === "Constructive but Fragile" ||
+      riskState === "Watchful Structure" ||
+      riskState === "Elevated Risk" ||
+      zoneScore <= 7.4
+    );
+
   if (
     confirmedBearishDeterioration ||
     accumulationZoneDefensiveBreak ||
     deepValuePanicBreak ||
+    deepValueDefensiveBreak ||
     (
       bearishPressure &&
       !inValueZone &&
