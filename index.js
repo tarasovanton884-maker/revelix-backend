@@ -4023,10 +4023,25 @@ function intelGetMediumTermRegime(
     (flowPulseLabel === "Bearish Pulse" && shortTermRegime === "Bearish") ||
     (whaleDirection === "Bearish" && shortTermRegime === "Bearish");
 
+  const valueZoneMarkdownPressure =
+    zone === "Accumulation Zone" &&
+    stableBiasLabel !== "Accumulation Bias" &&
+    whaleDirection !== "Bullish" &&
+    shortTermRegime === "Bearish" &&
+    (
+      flowPulseLabel === "Bearish Pulse" ||
+      riskState === "Constructive but Fragile" ||
+      riskState === "Watchful Structure" ||
+      riskState === "Elevated Risk"
+    ) &&
+    zoneScore <= 6.8;
+
   // Medium-term should not get stuck in Transition when price is inside a value
   // zone but live structure has clearly shifted into bearish/markdown pressure.
+  // Deep Value is still protected from instant Distribution unless deterioration
+  // is severe, because macro-bottom zones often look ugly before they stabilize.
   if (
-    confirmedBearishDeterioration &&
+    (confirmedBearishDeterioration || valueZoneMarkdownPressure) &&
     (
       zone === "Fair Value Zone" ||
       zone === "Premium Zone" ||
