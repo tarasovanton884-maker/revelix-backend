@@ -17,10 +17,6 @@ const ATTRACTIVENESS_CACHE_FILE =
   process.env.ATTRACTIVENESS_CACHE_FILE ||
   path.join(process.env.RENDER_DISK_MOUNT_PATH || "/tmp", "revelix_attractiveness_cache.json");
 
-const MEDIUM_TERM_REGIME_CACHE_FILE =
-  process.env.MEDIUM_TERM_REGIME_CACHE_FILE ||
-  path.join(process.env.RENDER_DISK_MOUNT_PATH || "/tmp", "revelix_medium_term_regime_cache.json");
-
 
 function isValidTicker(ticker) {
   const price = Number(ticker?.lastPrice);
@@ -985,40 +981,6 @@ function applyDashboardTrendConfirmation(candidateTrend, now = Date.now()) {
   return currentStable;
 }
 
-function readPersistentMediumTermRegime() {
-  try {
-    if (!MEDIUM_TERM_REGIME_CACHE_FILE || !fs.existsSync(MEDIUM_TERM_REGIME_CACHE_FILE)) return null;
-
-    const parsed = JSON.parse(fs.readFileSync(MEDIUM_TERM_REGIME_CACHE_FILE, "utf8"));
-    const regime = parsed?.regime;
-    const savedAt = Number(parsed?.savedAt);
-
-    if (!["Distribution Phase", "Transition Phase", "Accumulation Phase", "Re-Accumulation"].includes(regime)) return null;
-    if (Number.isFinite(savedAt) && Date.now() - savedAt > MEDIUM_TERM_REGIME_CACHE_TTL) return null;
-
-    return regime;
-  } catch (error) {
-    console.warn("Failed to read persistent medium-term regime cache:", error.message);
-    return null;
-  }
-}
-
-function writePersistentMediumTermRegime(regime) {
-  try {
-    if (!MEDIUM_TERM_REGIME_CACHE_FILE) return;
-    if (!["Distribution Phase", "Transition Phase", "Accumulation Phase", "Re-Accumulation"].includes(regime)) return;
-
-    fs.mkdirSync(path.dirname(MEDIUM_TERM_REGIME_CACHE_FILE), { recursive: true });
-    fs.writeFileSync(
-      MEDIUM_TERM_REGIME_CACHE_FILE,
-      JSON.stringify({ regime, savedAt: Date.now() }),
-      "utf8"
-    );
-  } catch (error) {
-    console.warn("Failed to write persistent medium-term regime cache:", error.message);
-  }
-}
-
 function getMediumTermRegimeRank(regime) {
   const ranks = {
     "Distribution Phase": 0,
@@ -1038,40 +1000,23 @@ function getMediumTermRegimeByRank(rank) {
 }
 
 function applyMediumTermRegimeConfirmation(candidateRegime, now = Date.now()) {
-  const persistentRegime = readPersistentMediumTermRegime();
-
   if (!candidateRegime) {
-    return (
-      INTELLIGENCE_STATE.stableMediumTermRegime ||
-      persistentRegime ||
-      "Transition Phase"
-    );
+    return INTELLIGENCE_STATE.stableMediumTermRegime || "Transition Phase";
   }
 
-  const currentStable =
-    INTELLIGENCE_STATE.stableMediumTermRegime ||
-    persistentRegime ||
-    candidateRegime;
+  const currentStable = INTELLIGENCE_STATE.stableMediumTermRegime || candidateRegime;
 
   if (!INTELLIGENCE_STATE.stableMediumTermRegime) {
-    INTELLIGENCE_STATE.stableMediumTermRegime = currentStable;
+    INTELLIGENCE_STATE.stableMediumTermRegime = candidateRegime;
     INTELLIGENCE_STATE.lastMediumTermRegimeCommitAt = now;
     INTELLIGENCE_STATE.lastMediumTermRegimeEvaluationAt = now;
-
-    if (currentStable !== candidateRegime) {
-      INTELLIGENCE_STATE.pendingMediumTermRegime = candidateRegime;
-      INTELLIGENCE_STATE.pendingMediumTermRegimeCount = 1;
-    }
-
-    writePersistentMediumTermRegime(currentStable);
-    return currentStable;
+    return candidateRegime;
   }
 
   const currentRank = getMediumTermRegimeRank(currentStable);
   const candidateRank = getMediumTermRegimeRank(candidateRegime);
 
-  // Deterioration can update immediately, one step at a time.
-  // This allows Transition -> Distribution quickly when structure gets worse.
+  // Deterioration can update faster, but still one step at a time so medium-term does not whip around.
   if (candidateRank < currentRank) {
     const nextRank = Math.max(currentRank - 1, candidateRank);
     const nextRegime = getMediumTermRegimeByRank(nextRank);
@@ -1081,14 +1026,12 @@ function applyMediumTermRegimeConfirmation(candidateRegime, now = Date.now()) {
     INTELLIGENCE_STATE.pendingMediumTermRegimeCount = 0;
     INTELLIGENCE_STATE.lastMediumTermRegimeCommitAt = now;
     INTELLIGENCE_STATE.lastMediumTermRegimeEvaluationAt = now;
-    writePersistentMediumTermRegime(nextRegime);
     return nextRegime;
   }
 
   if (candidateRank === currentRank) {
     INTELLIGENCE_STATE.pendingMediumTermRegime = null;
     INTELLIGENCE_STATE.pendingMediumTermRegimeCount = 0;
-    writePersistentMediumTermRegime(currentStable);
     return currentStable;
   }
 
@@ -1105,21 +1048,12 @@ function applyMediumTermRegimeConfirmation(candidateRegime, now = Date.now()) {
     INTELLIGENCE_STATE.pendingMediumTermRegimeCount = 1;
   }
 
-  const recoveringFromDistribution = currentStable === "Distribution Phase";
-  const requiredSnapshots = recoveringFromDistribution
-    ? MEDIUM_TERM_REGIME_RECOVERY_CONFIRMATION_SNAPSHOTS
-    : MEDIUM_TERM_REGIME_CONFIRMATION_SNAPSHOTS;
-  const requiredTime = recoveringFromDistribution
-    ? MEDIUM_TERM_MIN_REGIME_RECOVERY_CHANGE_MS
-    : MEDIUM_TERM_MIN_REGIME_CHANGE_MS;
-
   const enoughSnapshots =
-    INTELLIGENCE_STATE.pendingMediumTermRegimeCount >= requiredSnapshots;
+    INTELLIGENCE_STATE.pendingMediumTermRegimeCount >= MEDIUM_TERM_REGIME_CONFIRMATION_SNAPSHOTS;
   const enoughTime =
-    now - (INTELLIGENCE_STATE.lastMediumTermRegimeCommitAt || 0) >= requiredTime;
+    now - (INTELLIGENCE_STATE.lastMediumTermRegimeCommitAt || 0) >= MEDIUM_TERM_MIN_REGIME_CHANGE_MS;
 
   if (enoughSnapshots && enoughTime) {
-    // Improvements still move only one step per confirmed recovery window.
     const nextRank = Math.min(currentRank + 1, candidateRank);
     const nextRegime = getMediumTermRegimeByRank(nextRank);
 
@@ -1127,7 +1061,6 @@ function applyMediumTermRegimeConfirmation(candidateRegime, now = Date.now()) {
     INTELLIGENCE_STATE.pendingMediumTermRegime = null;
     INTELLIGENCE_STATE.pendingMediumTermRegimeCount = 0;
     INTELLIGENCE_STATE.lastMediumTermRegimeCommitAt = now;
-    writePersistentMediumTermRegime(nextRegime);
     return nextRegime;
   }
 
@@ -1480,9 +1413,6 @@ const DASHBOARD_MIN_TREND_CHANGE_MS = 10 * 60 * 1000;
 const MEDIUM_TERM_REGIME_CONFIRMATION_SNAPSHOTS = 3;
 const MEDIUM_TERM_REGIME_EVALUATION_MS = 10 * 60 * 1000;
 const MEDIUM_TERM_MIN_REGIME_CHANGE_MS = 30 * 60 * 1000;
-const MEDIUM_TERM_REGIME_RECOVERY_CONFIRMATION_SNAPSHOTS = 12;
-const MEDIUM_TERM_MIN_REGIME_RECOVERY_CHANGE_MS = 3 * 60 * 60 * 1000;
-const MEDIUM_TERM_REGIME_CACHE_TTL = 24 * 60 * 60 * 1000;
 
 const BTC_CIRCULATING_SUPPLY = 19_600_000;
 
@@ -4200,7 +4130,7 @@ function intelGetMediumTermRegime(
     stableBiasLabel !== "Accumulation Bias" &&
     whaleDirection !== "Bullish" &&
     shortTermRegime === "Bearish" &&
-    zoneScore <= 7.8 &&
+    zoneScore <= 7.4 &&
     (
       flowPulseLabel === "Bearish Pulse" ||
       riskState !== "Accumulation Opportunity"
@@ -4246,20 +4176,6 @@ function intelGetMediumTermRegime(
     inValueZone &&
     (stableBiasLabel === "Accumulation Bias" || stableBiasLabel === "Neutral Bias")
   ) {
-    // Transition is valid in value zones, but not as a quick escape from
-    // bearish medium-term pressure. If short-term is still Bearish and whales
-    // are not bullish, keep the candidate defensive unless real accumulation
-    // conditions are present.
-    if (
-      zone === "Accumulation Zone" &&
-      stableBiasLabel !== "Accumulation Bias" &&
-      shortTermRegime === "Bearish" &&
-      whaleDirection !== "Bullish" &&
-      zoneScore <= 7.8
-    ) {
-      return "Distribution Phase";
-    }
-
     return "Transition Phase";
   }
 
