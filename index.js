@@ -623,8 +623,20 @@ function applyRiskStateConfirmation(candidateRiskState, now = Date.now()) {
     INTELLIGENCE_STATE.pendingRiskStateCount = 1;
   }
 
-  const requiredSnapshots = worsening ? INTELLIGENCE_RISK_WORSENING_CONFIRMATION_SNAPSHOTS : INTELLIGENCE_RISK_CONFIRMATION_SNAPSHOTS;
-  const requiredTime = worsening ? INTELLIGENCE_MIN_RISK_WORSENING_CHANGE_MS : INTELLIGENCE_MIN_RISK_CHANGE_MS;
+  const accumulationBoundaryShift =
+    (currentStable === "Accumulation Opportunity" && candidateRiskState === "Constructive but Fragile") ||
+    (currentStable === "Constructive but Fragile" && candidateRiskState === "Accumulation Opportunity");
+
+  let requiredSnapshots = worsening ? INTELLIGENCE_RISK_WORSENING_CONFIRMATION_SNAPSHOTS : INTELLIGENCE_RISK_CONFIRMATION_SNAPSHOTS;
+  let requiredTime = worsening ? INTELLIGENCE_MIN_RISK_WORSENING_CHANGE_MS : INTELLIGENCE_MIN_RISK_CHANGE_MS;
+
+  // This boundary sits exactly where BTC can chop around value-zone thresholds.
+  // Require a bit more confirmation both ways so Risk State does not blink every few snapshots.
+  if (accumulationBoundaryShift) {
+    requiredSnapshots = 5;
+    requiredTime = 20 * 60 * 1000;
+  }
+
   const enoughSnapshots = INTELLIGENCE_STATE.pendingRiskStateCount >= requiredSnapshots;
   const enoughTime = now - (INTELLIGENCE_STATE.lastRiskStateCommitAt || 0) >= requiredTime;
 
@@ -4023,14 +4035,36 @@ ${intelFormatCompactMoney(totalInstitutional)} institutional-sized prints`.trim(
 function intelGetRiskState(currentZone, regime, whaleLabel, zoneScoreHint, stableBiasLabel, flowPulseLabel) {
   const expensiveZone = currentZone === "Premium Zone" || currentZone === "Overheated Zone";
   const cheapZone = currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone";
-  if (expensiveZone && (["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel) || regime === "Bull Expansion" || stableBiasLabel === "Distribution Risk")) return "Late Pump Risk";
-  if (zoneScoreHint >= 7.4 && cheapZone && stableBiasLabel === "Accumulation Bias" && !["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel)) return "Accumulation Opportunity";
+  const hostileWhaleFlow = ["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel);
+  const weakParticipation =
+    flowPulseLabel === "Bearish Pulse" ||
+    ["Low Big-Player Activity", "Isolated Large Trade", "Low Whale Activity"].includes(whaleLabel) ||
+    stableBiasLabel === "Neutral Bias";
+
+  if (expensiveZone && (hostileWhaleFlow || regime === "Bull Expansion" || stableBiasLabel === "Distribution Risk")) return "Late Pump Risk";
+
+  // Accumulation Opportunity should be earned by both price location and participation quality.
+  // Deep Value can still become an opportunity under stress, but only when the score is clearly high.
+  const cleanAccumulationOpportunity =
+    zoneScoreHint >= 7.4 &&
+    cheapZone &&
+    stableBiasLabel === "Accumulation Bias" &&
+    !hostileWhaleFlow &&
+    !weakParticipation;
+
+  const deepValueStressOpportunity =
+    zoneScoreHint >= 7.8 &&
+    currentZone === "Deep Value Zone" &&
+    stableBiasLabel === "Accumulation Bias" &&
+    !hostileWhaleFlow;
+
+  if (cleanAccumulationOpportunity || deepValueStressOpportunity) return "Accumulation Opportunity";
   if (expensiveZone) return "Elevated Risk";
   if (cheapZone) {
-    if (flowPulseLabel === "Bearish Pulse" || ["Low Big-Player Activity", "Isolated Large Trade", "Low Whale Activity"].includes(whaleLabel) || stableBiasLabel === "Neutral Bias") return "Constructive but Fragile";
+    if (weakParticipation) return "Constructive but Fragile";
     return "Constructive Structure";
   }
-  if (stableBiasLabel === "Distribution Risk" || ["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel)) return "Watchful Structure";
+  if (stableBiasLabel === "Distribution Risk" || hostileWhaleFlow) return "Watchful Structure";
   return "Neutral Structure";
 }
 
