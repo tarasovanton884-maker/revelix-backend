@@ -1304,10 +1304,10 @@ function calculateInvestorAttractiveness({
   // attractive for long-term investors, while still requiring participation
   // quality before it can reach the highest scores.
   if (inDeepValue) {
-    score += 1.4;
+    score += 1.25;
 
     if (Number.isFinite(priceToDeepValue) && priceToDeepValue <= 0.92) {
-      score += 0.5;
+      score += 0.3;
     }
 
     if (Number.isFinite(priceToDeepValue) && priceToDeepValue <= 0.85) {
@@ -1325,9 +1325,9 @@ function calculateInvestorAttractiveness({
 
   if (Number.isFinite(ma200w) && ma200w > 0 && Number.isFinite(price)) {
     if (price <= ma200w * 0.95) {
-      score += 0.75;
+      score += 0.65;
     } else if (price <= ma200w * 1.05) {
-      score += 0.45;
+      score += 0.35;
     }
   }
 
@@ -1358,7 +1358,7 @@ function calculateInvestorAttractiveness({
     (inDeepValue || inAccumulationValue);
 
   if (downsideCapitulationInValue && !antiFomoActive) {
-    score += inDeepValue ? 0.45 : 0.15;
+    score += inDeepValue ? 0.30 : 0.10;
   }
 
   const impulseWithoutValue =
@@ -4046,17 +4046,18 @@ function intelGetRiskState(currentZone, regime, whaleLabel, zoneScoreHint, stabl
   // Accumulation Opportunity should be earned by both price location and participation quality.
   // Deep Value can still become an opportunity under stress, but only when the score is clearly high.
   const cleanAccumulationOpportunity =
-    zoneScoreHint >= 7.4 &&
+    zoneScoreHint >= 7.6 &&
     cheapZone &&
     stableBiasLabel === "Accumulation Bias" &&
     !hostileWhaleFlow &&
     !weakParticipation;
 
   const deepValueStressOpportunity =
-    zoneScoreHint >= 7.8 &&
+    zoneScoreHint >= 8.25 &&
     currentZone === "Deep Value Zone" &&
     stableBiasLabel === "Accumulation Bias" &&
-    !hostileWhaleFlow;
+    !hostileWhaleFlow &&
+    !weakParticipation;
 
   if (cleanAccumulationOpportunity || deepValueStressOpportunity) return "Accumulation Opportunity";
   if (expensiveZone) return "Elevated Risk";
@@ -4073,28 +4074,33 @@ function intelGetRiskLevelDetailed(riskState, currentZone, stableBiasLabel, whal
   if (riskState === "Elevated Risk") return "Medium–High Risk";
   if (riskState === "Watchful Structure") return "Medium Risk";
   if (riskState === "Neutral Structure") return stableBiasLabel === "Distribution Risk" || ["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel) ? "Medium–High Risk" : "Medium Risk";
-  if (riskState === "Accumulation Opportunity") return "Low Risk";
+  if (riskState === "Accumulation Opportunity") {
+    const confirmedAccumulationFlow = ["Buy-Side Big-Player Flow", "Whale Accumulation"].includes(whaleLabel);
+    return currentZone === "Deep Value Zone" && confirmedAccumulationFlow
+      ? "Low Risk"
+      : "Low–Medium Risk";
+  }
   if (riskState === "Constructive but Fragile") return "Low–Medium Risk";
-  if (riskState === "Constructive Structure") return currentZone === "Accumulation Zone" && !["Buy-Side Big-Player Flow", "Whale Accumulation"].includes(whaleLabel) ? "Low–Medium Risk" : "Low Risk";
+  if (riskState === "Constructive Structure") return currentZone === "Deep Value Zone" && ["Buy-Side Big-Player Flow", "Whale Accumulation"].includes(whaleLabel) ? "Low Risk" : "Low–Medium Risk";
   return "Medium Risk";
 }
 
 function intelGetAttractivenessBreakdown(price, ma200w, riskLevel, currentZone, stableBiasLabel, whaleLabel) {
   let structureScore = 0, riskScore = 0, momentumScore = 0, rangeScore = 0, participationScore = 0;
-  if (currentZone === "Deep Value Zone") structureScore = 3.6;
+  if (currentZone === "Deep Value Zone") structureScore = 3.4;
   if (currentZone === "Accumulation Zone") structureScore = 2.8;
   if (currentZone === "Fair Value Zone") structureScore = 1.7;
   if (currentZone === "Premium Zone") structureScore = 0.7;
   if (currentZone === "Overheated Zone") structureScore = 0.2;
-  if (riskLevel === "Low Risk") riskScore = 2.0;
-  if (riskLevel === "Low–Medium Risk") riskScore = 1.2;
+  if (riskLevel === "Low Risk") riskScore = 1.6;
+  if (riskLevel === "Low–Medium Risk") riskScore = 1.0;
   if (riskLevel === "Medium Risk") riskScore = 0.2;
   if (riskLevel === "Medium–High Risk") riskScore = -0.9;
   if (riskLevel === "High Risk") riskScore = -1.8;
   if (ma200w > 0) {
     const ratio = price / ma200w;
-    if (ratio < 1.0) rangeScore = 1.8;
-    else if (ratio < 1.15) rangeScore = 1.3;
+    if (ratio < 1.0) rangeScore = 1.55;
+    else if (ratio < 1.15) rangeScore = 1.15;
     else if (ratio < 1.35) rangeScore = 0.8;
     else if (ratio < 1.6) rangeScore = 0.1;
     else rangeScore = -0.8;
@@ -4106,7 +4112,15 @@ function intelGetAttractivenessBreakdown(price, ma200w, riskLevel, currentZone, 
   if (["Buy-Side Big-Player Flow", "Whale Accumulation"].includes(whaleLabel)) participationScore += 0.3;
   if (["Sell-Side Big-Player Flow", "Whale Distribution"].includes(whaleLabel)) participationScore -= 0.4;
   if (["Low Big-Player Activity", "Isolated Large Trade", "Low Whale Activity"].includes(whaleLabel)) participationScore -= 0.1;
-  const total = clamp(structureScore + riskScore + rangeScore + momentumScore + participationScore, 1.5, 8.8);
+  const confirmedAccumulationFlow = ["Buy-Side Big-Player Flow", "Whale Accumulation"].includes(whaleLabel);
+  const earnedHighScoreBonus =
+    currentZone === "Deep Value Zone" &&
+    riskLevel === "Low Risk" &&
+    stableBiasLabel === "Accumulation Bias" &&
+    confirmedAccumulationFlow
+      ? 0.45
+      : 0;
+  const total = clamp(structureScore + riskScore + rangeScore + momentumScore + participationScore + earnedHighScoreBonus, 1.5, 8.8);
   return { total: Number(total.toFixed(1)), structureScore: Number(structureScore.toFixed(1)), riskScore: Number(riskScore.toFixed(1)), rangeScore: Number(rangeScore.toFixed(1)), momentumScore: Number(momentumScore.toFixed(1)), participationScore: Number(participationScore.toFixed(1)) };
 }
 
