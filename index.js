@@ -120,10 +120,12 @@ const PUSH_TEXTS = {
     ["Risk alert", "Market structure is becoming less supportive."],
   ],
   fomo: [
-    ["Anti-FOMO active", "Market is moving too fast. Avoid chasing this move."],
-    ["Overheating detected", "Momentum looks too fast. Stay patient."],
-    ["Stay selective", "Fast upside does not always mean a clean entry."],
-    ["Don’t chase this move", "Price is running faster than structure supports."],
+    ["Anti-FOMO active", "Price is moving faster than structure supports. Avoid chasing."],
+    ["Momentum is hot", "Entry quality is weaker when price runs ahead of structure."],
+    ["Stay selective", "Fast upside does not always mean a clean long-term entry."],
+    ["Don’t chase this move", "This is where FOMO usually gets expensive."],
+    ["Overheating detected", "Momentum is stretched. Let the setup cool or confirm first."],
+    ["Chasing risk is rising", "The move is fast, but the structure may not support it yet."],
   ],
   phase_markup: [
     ["Expansion phase", "Market may be entering a stronger expansion phase."],
@@ -1481,6 +1483,46 @@ function getNextPushVariant(type) {
   return variants[nextIndex];
 }
 
+function getPushPriority(type) {
+  const priorities = {
+    signal_down: 100,
+    risk: 90,
+    phase_markdown: 85,
+    phase_distribution: 80,
+    fomo: 70,
+    phase_accumulation: 60,
+    signal_up: 55,
+    phase_markup: 50,
+  };
+
+  return priorities[type] ?? 10;
+}
+
+function selectHighestPriorityPushEvent(events = []) {
+  const validEvents = events.filter((event) => event?.type);
+  if (!validEvents.length) return null;
+
+  return validEvents.sort((a, b) => getPushPriority(b.type) - getPushPriority(a.type))[0];
+}
+
+function pushStateSummary({
+  currentSignal,
+  currentRisk,
+  currentAntiFomo,
+  currentPhase,
+}) {
+  return {
+    previousSignal: PUSH_RUNTIME_STATE.lastSignal,
+    currentSignal,
+    previousRisk: PUSH_RUNTIME_STATE.lastRisk,
+    currentRisk,
+    previousAntiFomo: PUSH_RUNTIME_STATE.lastAntiFomo,
+    currentAntiFomo,
+    previousPhase: PUSH_RUNTIME_STATE.lastPhase,
+    currentPhase,
+  };
+}
+
 async function getRegisteredTokens() {
   if (!supabase) return [];
 
@@ -1666,6 +1708,13 @@ async function processPushSignals() {
     const currentAntiFomo = deriveAntiFomoState(marketData);
     const currentPhase = deriveMarketPhase(marketAdvanced);
 
+    const debugState = pushStateSummary({
+      currentSignal,
+      currentRisk,
+      currentAntiFomo,
+      currentPhase,
+    });
+
     if (
       PUSH_RUNTIME_STATE.lastSignal === null &&
       PUSH_RUNTIME_STATE.lastRisk === null &&
@@ -1675,62 +1724,102 @@ async function processPushSignals() {
       PUSH_RUNTIME_STATE.lastRisk = currentRisk;
       PUSH_RUNTIME_STATE.lastPhase = currentPhase;
       PUSH_RUNTIME_STATE.lastAntiFomo = currentAntiFomo;
-      console.log("Push runtime state bootstrapped");
+      console.log("Push runtime state bootstrapped:", JSON.stringify(debugState));
       return;
     }
+
+    console.log("Push debug:", JSON.stringify(debugState));
+
+    const pushEvents = [];
+    const improvingSignals = new Set(["Accumulation", "Deep Value"]);
+    const worseningSignals = new Set(["Distribution Risk"]);
 
     if (
       PUSH_RUNTIME_STATE.lastSignal &&
       currentSignal &&
       PUSH_RUNTIME_STATE.lastSignal !== currentSignal
     ) {
-      const improvingSignals = new Set(["Accumulation", "Deep Value"]);
-      const worseningSignals = new Set(["Distribution Risk"]);
-
       if (
-        improvingSignals.has(currentSignal) &&
-        !improvingSignals.has(PUSH_RUNTIME_STATE.lastSignal)
-      ) {
-        console.log(`Auto push trigger: signal_up (${PUSH_RUNTIME_STATE.lastSignal} -> ${currentSignal})`);
-        await sendPushNotification("signal_up");
-      } else if (
         worseningSignals.has(currentSignal) &&
         !worseningSignals.has(PUSH_RUNTIME_STATE.lastSignal)
       ) {
-        console.log(`Auto push trigger: signal_down (${PUSH_RUNTIME_STATE.lastSignal} -> ${currentSignal})`);
-        await sendPushNotification("signal_down");
+        pushEvents.push({
+          type: "signal_down",
+          reason: `${PUSH_RUNTIME_STATE.lastSignal} -> ${currentSignal}`,
+        });
+      } else if (
+        improvingSignals.has(currentSignal) &&
+        !improvingSignals.has(PUSH_RUNTIME_STATE.lastSignal)
+      ) {
+        pushEvents.push({
+          type: "signal_up",
+          reason: `${PUSH_RUNTIME_STATE.lastSignal} -> ${currentSignal}`,
+        });
       }
-    } else if (
+    }
+
+    if (
       PUSH_RUNTIME_STATE.lastRisk &&
       currentRisk === "high" &&
       PUSH_RUNTIME_STATE.lastRisk !== "high"
     ) {
-      console.log(`Auto push trigger: risk (${PUSH_RUNTIME_STATE.lastRisk} -> ${currentRisk})`);
-      await sendPushNotification("risk");
-    } else if (
-      PUSH_RUNTIME_STATE.lastAntiFomo === false &&
-      currentAntiFomo === true
-    ) {
-      console.log("Auto push trigger: fomo");
-      await sendPushNotification("fomo");
-    } else if (
+      pushEvents.push({
+        type: "risk",
+        reason: `${PUSH_RUNTIME_STATE.lastRisk} -> ${currentRisk}`,
+      });
+    }
+
+    // Anti-FOMO is important even if the exact false -> true transition was missed
+    // while the service was sleeping. sendPushNotification still enforces max 1
+    // push per token per day, so this stays non-spammy.
+    if (currentAntiFomo === true) {
+      pushEvents.push({
+        type: "fomo",
+        reason: PUSH_RUNTIME_STATE.lastAntiFomo === false
+          ? "anti_fomo_activated"
+          : "anti_fomo_active_daily_guard",
+      });
+    }
+
+    if (
       PUSH_RUNTIME_STATE.lastPhase &&
       currentPhase !== "neutral" &&
       currentPhase !== PUSH_RUNTIME_STATE.lastPhase
     ) {
       if (currentPhase === "markup") {
-        console.log(`Auto push trigger: phase_markup (${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase})`);
-        await sendPushNotification("phase_markup");
+        pushEvents.push({
+          type: "phase_markup",
+          reason: `${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase}`,
+        });
       } else if (currentPhase === "distribution") {
-        console.log(`Auto push trigger: phase_distribution (${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase})`);
-        await sendPushNotification("phase_distribution");
+        pushEvents.push({
+          type: "phase_distribution",
+          reason: `${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase}`,
+        });
       } else if (currentPhase === "markdown") {
-        console.log(`Auto push trigger: phase_markdown (${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase})`);
-        await sendPushNotification("phase_markdown");
+        pushEvents.push({
+          type: "phase_markdown",
+          reason: `${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase}`,
+        });
       } else if (currentPhase === "accumulation") {
-        console.log(`Auto push trigger: phase_accumulation (${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase})`);
-        await sendPushNotification("phase_accumulation");
+        pushEvents.push({
+          type: "phase_accumulation",
+          reason: `${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase}`,
+        });
       }
+    }
+
+    const selectedEvent = selectHighestPriorityPushEvent(pushEvents);
+
+    if (selectedEvent) {
+      console.log(
+        `Auto push trigger: ${selectedEvent.type} (${selectedEvent.reason}); candidates=${pushEvents
+          .map((event) => event.type)
+          .join(",")}`
+      );
+      await sendPushNotification(selectedEvent.type);
+    } else {
+      console.log("Push skipped: no eligible market event");
     }
 
     PUSH_RUNTIME_STATE.lastSignal = currentSignal;
