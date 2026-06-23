@@ -41,6 +41,9 @@ const PUSH_RUNTIME_STATE = {
   lastRisk: null,
   lastPhase: null,
   lastAntiFomo: false,
+  lastClarity: null,
+  lastRiskState: null,
+  lastRiskLevel: null,
 };
 
 const INTELLIGENCE_STATE = {
@@ -102,48 +105,56 @@ const INTELLIGENCE_STATE = {
 
 const PUSH_TEXTS = {
   signal_up: [
-    ["Market conditions changed", "Check the latest update in Revelix."],
-    ["Market structure updated", "See what's changed in Revelix."],
-    ["A new market signal is available", "Open Revelix for details."],
-    ["Conditions shifted", "Review the latest assessment in Revelix."],
+    ["New market read available", "Revelix updated the latest investor view."],
+    ["Investor view refreshed", "Open Revelix to review the current setup."],
+    ["Setup review updated", "The latest market read is ready inside Revelix."],
+    ["Fresh structure check", "See how the investor model reads this move."],
   ],
   signal_down: [
-    ["Market conditions changed", "Check the latest update in Revelix."],
-    ["Market structure updated", "See what's changed in Revelix."],
-    ["A new market signal is available", "Open Revelix for details."],
-    ["Conditions shifted", "Review the latest assessment in Revelix."],
+    ["Market caution updated", "Revelix detected a less supportive setup."],
+    ["Risk tone changed", "Open Revelix to review the current market read."],
+    ["Structure looks weaker", "Check the latest investor view inside Revelix."],
+    ["Caution level refreshed", "See what changed in the latest Revelix update."],
   ],
   risk: [
-    ["Risk conditions changed", "Review the latest market structure."],
-    ["Market conditions changed", "Check the latest update in Revelix."],
-    ["A new market signal is available", "Open Revelix for details."],
-    ["Conditions shifted", "Review the latest assessment in Revelix."],
+    ["Entry risk updated", "Review the latest risk read in Revelix."],
+    ["Risk profile changed", "Open Revelix to check the current setup."],
+    ["Market risk shifted", "See the latest structure read inside Revelix."],
+    ["Risk check refreshed", "Revelix has a new risk update ready."],
   ],
   fomo: [
-    ["Anti-FOMO triggered", "Stay selective."],
-    ["Fast moves can create poor entries", "Check Revelix."],
-    ["Momentum is rising", "Entry quality may not be."],
-    ["Market conditions changed", "Review the latest update in Revelix."],
+    ["Anti-FOMO triggered", "Stay selective and review the setup."],
+    ["Fast move detected", "Check whether entry quality still holds."],
+    ["Momentum picked up", "Revelix is flagging a faster market move."],
+    ["Chasing risk changed", "Open Revelix before reacting to the move."],
   ],
   phase_markup: [
-    ["Market structure updated", "See the latest assessment in Revelix."],
-    ["Conditions shifted", "Check the latest update in Revelix."],
-    ["A new market signal is available", "Open Revelix for details."],
+    ["Expansion read updated", "Check the latest market phase in Revelix."],
+    ["Upside structure changed", "Open Revelix to review the new phase read."],
+    ["Market phase refreshed", "See how Revelix reads the current expansion."],
   ],
   phase_distribution: [
-    ["Market structure updated", "See the latest assessment in Revelix."],
-    ["Conditions shifted", "Check the latest update in Revelix."],
-    ["A new market signal is available", "Open Revelix for details."],
+    ["Distribution read updated", "Review the latest structure check in Revelix."],
+    ["Top-side risk changed", "Open Revelix to see the current phase read."],
+    ["Market phase warning", "Check how Revelix reads the broader setup."],
   ],
   phase_markdown: [
-    ["Market structure updated", "See the latest assessment in Revelix."],
-    ["Conditions shifted", "Check the latest update in Revelix."],
-    ["A new market signal is available", "Open Revelix for details."],
+    ["Markdown read updated", "Review the latest downside structure in Revelix."],
+    ["Downside structure changed", "Open Revelix to check the current phase."],
+    ["Market pressure updated", "See the latest phase assessment in Revelix."],
   ],
   phase_accumulation: [
-    ["Market structure updated", "See the latest assessment in Revelix."],
-    ["Conditions shifted", "Check the latest update in Revelix."],
-    ["A new market signal is available", "Open Revelix for details."],
+    ["Accumulation read updated", "Check the latest base-building view in Revelix."],
+    ["Value zone read changed", "Open Revelix to review the current setup."],
+    ["Market base check", "See how Revelix reads the accumulation zone."],
+  ],
+  reminder: [
+    ["Revelix market check", "Your latest BTC read is ready."],
+    ["BTC structure update", "Open Revelix for the current investor view."],
+    ["Market check-in", "Review the latest BTC setup in Revelix."],
+    ["Revelix update", "The current market read is ready to review."],
+    ["Investor read refreshed", "Check today's BTC structure in Revelix."],
+    ["BTC setup review", "Open Revelix to see the latest market view."],
   ],
 };
 
@@ -1491,6 +1502,7 @@ function getPushPriority(type) {
     phase_accumulation: 60,
     signal_up: 55,
     phase_markup: 50,
+    reminder: 5,
   };
 
   return priorities[type] ?? 10;
@@ -1508,6 +1520,9 @@ function pushStateSummary({
   currentRisk,
   currentAntiFomo,
   currentPhase,
+  currentClarity,
+  currentRiskState,
+  currentRiskLevel,
 }) {
   return {
     previousSignal: PUSH_RUNTIME_STATE.lastSignal,
@@ -1518,6 +1533,12 @@ function pushStateSummary({
     currentAntiFomo,
     previousPhase: PUSH_RUNTIME_STATE.lastPhase,
     currentPhase,
+    previousClarity: PUSH_RUNTIME_STATE.lastClarity,
+    currentClarity,
+    previousRiskState: PUSH_RUNTIME_STATE.lastRiskState,
+    currentRiskState,
+    previousRiskLevel: PUSH_RUNTIME_STATE.lastRiskLevel,
+    currentRiskLevel,
   };
 }
 
@@ -1537,13 +1558,24 @@ async function getRegisteredTokens() {
   return Array.isArray(data) ? data.filter((row) => isExpoPushToken(row.token)) : [];
 }
 
-function canSendTodayForRow(row) {
-  const today = new Date().toISOString().slice(0, 10);
-  const lastSentDay = row?.last_sent_at
-    ? new Date(row.last_sent_at).toISOString().slice(0, 10)
-    : null;
+const PUSH_REMINDER_MIN_INTERVAL_MS = 36 * 60 * 60 * 1000;
 
-  return lastSentDay !== today;
+function rowCanReceivePush(row, minIntervalMs = 0) {
+  if (!row?.last_sent_at) return true;
+
+  const lastSentAt = new Date(row.last_sent_at).getTime();
+  if (!Number.isFinite(lastSentAt)) return true;
+
+  // Hard guard: no more than one push per UTC day for the same token.
+  const today = new Date().toISOString().slice(0, 10);
+  const lastSentDay = new Date(lastSentAt).toISOString().slice(0, 10);
+  if (lastSentDay === today) return false;
+
+  if (Number.isFinite(minIntervalMs) && minIntervalMs > 0) {
+    return Date.now() - lastSentAt >= minIntervalMs;
+  }
+
+  return true;
 }
 
 async function markTokenSent(rowId, type) {
@@ -1575,16 +1607,21 @@ async function removeTokenByRowId(rowId) {
   }
 }
 
-async function sendPushNotification(type) {
+async function sendPushNotification(type, options = {}) {
   const rows = await getRegisteredTokens();
   if (!rows.length) {
     console.log("No registered push tokens");
     return false;
   }
 
-  const eligibleRows = rows.filter(canSendTodayForRow);
+  const minIntervalMs = Number(options.minIntervalMs || 0);
+  const eligibleRows = rows.filter((row) => rowCanReceivePush(row, minIntervalMs));
   if (!eligibleRows.length) {
-    console.log("Push skipped: all tokens already received a push today");
+    console.log(
+      minIntervalMs > 0
+        ? "Push skipped: reminder cooldown active for all tokens"
+        : "Push skipped: all tokens already received a push today"
+    );
     return false;
   }
 
@@ -1686,6 +1723,32 @@ function deriveMarketPhase(marketAdvanced) {
 
   return "neutral";
 }
+function getEntryRiskRank(label) {
+  const ranks = {
+    Low: 0,
+    Medium: 1,
+    High: 2,
+    low: 0,
+    medium: 1,
+    high: 2,
+  };
+  return ranks[label] ?? 1;
+}
+
+function getClarityRank(label) {
+  const ranks = {
+    Low: 0,
+    Medium: 1,
+    High: 2,
+  };
+  return ranks[label] ?? 1;
+}
+
+function shouldSendReminderPush(rows) {
+  if (!Array.isArray(rows) || !rows.length) return false;
+  return rows.some((row) => rowCanReceivePush(row, PUSH_REMINDER_MIN_INTERVAL_MS));
+}
+
 
 async function processPushSignals() {
   try {
@@ -1701,16 +1764,32 @@ async function processPushSignals() {
       }),
     ]);
 
-    const currentSignal = intelligence?.investorBias || null;
-    const currentRisk = deriveRiskBucket(intelligence);
-    const currentAntiFomo = deriveAntiFomoState(marketData);
-    const currentPhase = deriveMarketPhase(marketAdvanced);
+    const dashboardSignal = marketData?.finalInvestorSignal || {};
+    const marketClarity = marketData?.marketClarity || {};
+
+    // Pushes should follow the same user-facing reads people see in the app,
+    // not only the slower macro Intelligence bias. This keeps them useful as a
+    // light reminder without turning them into trading calls.
+    const currentSignal = dashboardSignal.signal || intelligence?.investorBias || null;
+    const currentRisk = dashboardSignal.entryRisk || deriveRiskBucket(intelligence);
+    const currentAntiFomo = Boolean(
+      dashboardSignal.antiFomoActive ||
+      deriveAntiFomoState(marketData) ||
+      intelligence?.stability?.antiFomoAdjusted
+    );
+    const currentPhase = marketAdvanced?.cyclePhase?.phase || deriveMarketPhase(marketAdvanced);
+    const currentClarity = marketClarity.level || null;
+    const currentRiskState = intelligence?.riskState || intelligence?.intelligenceModel?.riskState || null;
+    const currentRiskLevel = intelligence?.riskLevel || intelligence?.intelligenceModel?.riskLevel || null;
 
     const debugState = pushStateSummary({
       currentSignal,
       currentRisk,
       currentAntiFomo,
       currentPhase,
+      currentClarity,
+      currentRiskState,
+      currentRiskLevel,
     });
 
     if (
@@ -1722,6 +1801,9 @@ async function processPushSignals() {
       PUSH_RUNTIME_STATE.lastRisk = currentRisk;
       PUSH_RUNTIME_STATE.lastPhase = currentPhase;
       PUSH_RUNTIME_STATE.lastAntiFomo = currentAntiFomo;
+      PUSH_RUNTIME_STATE.lastClarity = currentClarity;
+      PUSH_RUNTIME_STATE.lastRiskState = currentRiskState;
+      PUSH_RUNTIME_STATE.lastRiskLevel = currentRiskLevel;
       console.log("Push runtime state bootstrapped:", JSON.stringify(debugState));
       return;
     }
@@ -1729,26 +1811,28 @@ async function processPushSignals() {
     console.log("Push debug:", JSON.stringify(debugState));
 
     const pushEvents = [];
-    const improvingSignals = new Set(["Accumulation", "Deep Value"]);
-    const worseningSignals = new Set(["Distribution Risk"]);
+    const previousSignalRank = getDashboardSignalRank(PUSH_RUNTIME_STATE.lastSignal);
+    const currentSignalRank = getDashboardSignalRank(currentSignal);
+    const previousEntryRiskRank = getEntryRiskRank(PUSH_RUNTIME_STATE.lastRisk);
+    const currentEntryRiskRank = getEntryRiskRank(currentRisk);
+    const previousRiskStateRank = getRiskStateRank(PUSH_RUNTIME_STATE.lastRiskState);
+    const currentRiskStateRank = getRiskStateRank(currentRiskState);
+    const previousRiskLevelRank = getRiskLevelRank(PUSH_RUNTIME_STATE.lastRiskLevel);
+    const currentRiskLevelRank = getRiskLevelRank(currentRiskLevel);
+    const previousClarityRank = getClarityRank(PUSH_RUNTIME_STATE.lastClarity);
+    const currentClarityRank = getClarityRank(currentClarity);
 
     if (
       PUSH_RUNTIME_STATE.lastSignal &&
       currentSignal &&
       PUSH_RUNTIME_STATE.lastSignal !== currentSignal
     ) {
-      if (
-        worseningSignals.has(currentSignal) &&
-        !worseningSignals.has(PUSH_RUNTIME_STATE.lastSignal)
-      ) {
+      if (currentSignalRank < previousSignalRank) {
         pushEvents.push({
           type: "signal_down",
           reason: `${PUSH_RUNTIME_STATE.lastSignal} -> ${currentSignal}`,
         });
-      } else if (
-        improvingSignals.has(currentSignal) &&
-        !improvingSignals.has(PUSH_RUNTIME_STATE.lastSignal)
-      ) {
+      } else if (currentSignalRank > previousSignalRank) {
         pushEvents.push({
           type: "signal_up",
           reason: `${PUSH_RUNTIME_STATE.lastSignal} -> ${currentSignal}`,
@@ -1758,12 +1842,49 @@ async function processPushSignals() {
 
     if (
       PUSH_RUNTIME_STATE.lastRisk &&
-      currentRisk === "high" &&
-      PUSH_RUNTIME_STATE.lastRisk !== "high"
+      currentRisk &&
+      currentEntryRiskRank > previousEntryRiskRank &&
+      (currentRisk === "High" || currentRisk === "high")
     ) {
       pushEvents.push({
         type: "risk",
-        reason: `${PUSH_RUNTIME_STATE.lastRisk} -> ${currentRisk}`,
+        reason: `entry_risk ${PUSH_RUNTIME_STATE.lastRisk} -> ${currentRisk}`,
+      });
+    }
+
+    if (
+      PUSH_RUNTIME_STATE.lastRiskState &&
+      currentRiskState &&
+      currentRiskStateRank > previousRiskStateRank &&
+      currentRiskStateRank >= getRiskStateRank("Watchful Structure")
+    ) {
+      pushEvents.push({
+        type: "risk",
+        reason: `risk_state ${PUSH_RUNTIME_STATE.lastRiskState} -> ${currentRiskState}`,
+      });
+    }
+
+    if (
+      PUSH_RUNTIME_STATE.lastRiskLevel &&
+      currentRiskLevel &&
+      currentRiskLevelRank > previousRiskLevelRank &&
+      currentRiskLevelRank >= getRiskLevelRank("Medium–High Risk")
+    ) {
+      pushEvents.push({
+        type: "risk",
+        reason: `risk_level ${PUSH_RUNTIME_STATE.lastRiskLevel} -> ${currentRiskLevel}`,
+      });
+    }
+
+    if (
+      PUSH_RUNTIME_STATE.lastClarity &&
+      currentClarity &&
+      currentClarityRank < previousClarityRank &&
+      currentClarity === "Low"
+    ) {
+      pushEvents.push({
+        type: "risk",
+        reason: `clarity ${PUSH_RUNTIME_STATE.lastClarity} -> ${currentClarity}`,
       });
     }
 
@@ -1781,25 +1902,26 @@ async function processPushSignals() {
 
     if (
       PUSH_RUNTIME_STATE.lastPhase &&
+      currentPhase &&
       currentPhase !== "neutral" &&
       currentPhase !== PUSH_RUNTIME_STATE.lastPhase
     ) {
-      if (currentPhase === "markup") {
+      if (currentPhase === "Markup" || currentPhase === "markup") {
         pushEvents.push({
           type: "phase_markup",
           reason: `${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase}`,
         });
-      } else if (currentPhase === "distribution") {
+      } else if (currentPhase === "Distribution" || currentPhase === "distribution") {
         pushEvents.push({
           type: "phase_distribution",
           reason: `${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase}`,
         });
-      } else if (currentPhase === "markdown") {
+      } else if (currentPhase === "Markdown" || currentPhase === "markdown") {
         pushEvents.push({
           type: "phase_markdown",
           reason: `${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase}`,
         });
-      } else if (currentPhase === "accumulation") {
+      } else if (currentPhase === "Accumulation" || currentPhase === "accumulation" || currentPhase === "Macro Bottom") {
         pushEvents.push({
           type: "phase_accumulation",
           reason: `${PUSH_RUNTIME_STATE.lastPhase} -> ${currentPhase}`,
@@ -1817,13 +1939,22 @@ async function processPushSignals() {
       );
       await sendPushNotification(selectedEvent.type);
     } else {
-      console.log("Push skipped: no eligible market event");
+      const rows = await getRegisteredTokens();
+      if (shouldSendReminderPush(rows)) {
+        console.log("Auto push trigger: reminder (cooldown elapsed); candidates=reminder");
+        await sendPushNotification("reminder", { minIntervalMs: PUSH_REMINDER_MIN_INTERVAL_MS });
+      } else {
+        console.log("Push skipped: no eligible market event");
+      }
     }
 
     PUSH_RUNTIME_STATE.lastSignal = currentSignal;
     PUSH_RUNTIME_STATE.lastRisk = currentRisk;
     PUSH_RUNTIME_STATE.lastPhase = currentPhase;
     PUSH_RUNTIME_STATE.lastAntiFomo = currentAntiFomo;
+    PUSH_RUNTIME_STATE.lastClarity = currentClarity;
+    PUSH_RUNTIME_STATE.lastRiskState = currentRiskState;
+    PUSH_RUNTIME_STATE.lastRiskLevel = currentRiskLevel;
   } catch (error) {
     console.error("Push processing failed:", error);
   }
