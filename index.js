@@ -239,6 +239,66 @@ async function withCache(key, ttlMs, fn, options = {}) {
   return promise;
 }
 
+// Refreshes one cache entry with in-flight deduplication. This is kept separate
+// from request handling so a slow upstream API never has to block an app screen
+// when a previously successful snapshot is already available.
+function refreshCacheInBackground(key, ttlMs, fn, options = {}) {
+  const { allowStaleOnError = true } = options;
+
+  if (INFLIGHT.has(key)) {
+    return INFLIGHT.get(key);
+  }
+
+  const promise = (async () => {
+    try {
+      const fresh = await fn();
+      if (fresh !== null && fresh !== undefined) {
+        setCache(key, fresh, ttlMs);
+      }
+      return fresh;
+    } catch (error) {
+      const stale = getCache(key, true);
+      if (allowStaleOnError && stale !== null) {
+        console.warn(`Background refresh kept stale cache for ${key}:`, error.message);
+        return stale;
+      }
+      throw error;
+    } finally {
+      INFLIGHT.delete(key);
+    }
+  })();
+
+  INFLIGHT.set(key, promise);
+  return promise;
+}
+
+// Stale-while-revalidate for user-facing screens:
+// 1) fresh snapshot -> return immediately;
+// 2) expired but valid snapshot -> return immediately and refresh in background;
+// 3) no snapshot yet -> wait once for the initial calculation.
+async function withStaleWhileRevalidate(key, ttlMs, fn, options = {}) {
+  const fresh = getCache(key);
+  if (fresh !== null) {
+    return { value: fresh, cacheStatus: "fresh" };
+  }
+
+  const stale = getCache(key, true);
+  if (stale !== null) {
+    refreshCacheInBackground(key, ttlMs, fn, options).catch((error) => {
+      console.warn(`Background refresh failed for ${key}:`, error.message);
+    });
+    return { value: stale, cacheStatus: "stale" };
+  }
+
+  const value = await refreshCacheInBackground(key, ttlMs, fn, options);
+  return { value, cacheStatus: "initial" };
+}
+
+function logEndpointTiming(name, startedAt, cacheStatus) {
+  const durationMs = Date.now() - startedAt;
+  console.log(`[PERF] ${name} ${durationMs}ms cache=${cacheStatus || "unknown"}`);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -4976,60 +5036,90 @@ app.post("/api/push/unregister", async (req, res) => {
 });
 
 app.get("/api/dashboard", async (_req, res) => {
+  const startedAt = Date.now();
   try {
-    const data = await withCache("dashboard", DASHBOARD_TTL, getDashboardPayload, {
-      allowStaleOnError: true,
-    });
-    res.json(data);
+    const result = await withStaleWhileRevalidate(
+      "dashboard",
+      DASHBOARD_TTL,
+      getDashboardPayload,
+      { allowStaleOnError: true }
+    );
+    logEndpointTiming("dashboard", startedAt, result.cacheStatus);
+    res.json(result.value);
   } catch (error) {
+    logEndpointTiming("dashboard", startedAt, "error");
     console.error("Dashboard endpoint failed:", error);
     res.status(500).json({ ok: false, error: "Failed to load dashboard data" });
   }
 });
 
 app.get("/api/market-data", async (_req, res) => {
+  const startedAt = Date.now();
   try {
-    const data = await withCache("market-data", MARKET_DATA_TTL, getMarketDataPayload, {
-      allowStaleOnError: true,
-    });
-    res.json(data);
+    const result = await withStaleWhileRevalidate(
+      "market-data",
+      MARKET_DATA_TTL,
+      getMarketDataPayload,
+      { allowStaleOnError: true }
+    );
+    logEndpointTiming("market-data", startedAt, result.cacheStatus);
+    res.json(result.value);
   } catch (error) {
+    logEndpointTiming("market-data", startedAt, "error");
     console.error("Market data endpoint failed:", error);
     res.status(500).json({ ok: false, error: "Failed to load market data" });
   }
 });
 
 app.get("/api/order-flow", async (_req, res) => {
+  const startedAt = Date.now();
   try {
-    const data = await withCache("order-flow", ORDER_FLOW_TTL, getOrderFlowPayload, {
-      allowStaleOnError: true,
-    });
-    res.json(data);
+    const result = await withStaleWhileRevalidate(
+      "order-flow",
+      ORDER_FLOW_TTL,
+      getOrderFlowPayload,
+      { allowStaleOnError: true }
+    );
+    logEndpointTiming("order-flow", startedAt, result.cacheStatus);
+    res.json(result.value);
   } catch (error) {
+    logEndpointTiming("order-flow", startedAt, "error");
     console.error("Order flow endpoint failed:", error);
     res.status(500).json({ ok: false, error: "Failed to load order flow data" });
   }
 });
 
 app.get("/api/market-advanced", async (_req, res) => {
+  const startedAt = Date.now();
   try {
-    const data = await withCache("market-advanced", MARKET_ADVANCED_TTL, getMarketAdvancedPayload, {
-      allowStaleOnError: true,
-    });
-    res.json(data);
+    const result = await withStaleWhileRevalidate(
+      "market-advanced",
+      MARKET_ADVANCED_TTL,
+      getMarketAdvancedPayload,
+      { allowStaleOnError: true }
+    );
+    logEndpointTiming("market-advanced", startedAt, result.cacheStatus);
+    res.json(result.value);
   } catch (error) {
+    logEndpointTiming("market-advanced", startedAt, "error");
     console.error("Market advanced endpoint failed:", error);
     res.status(500).json({ ok: false, error: "Failed to load market advanced data" });
   }
 });
 
 app.get("/api/intelligence", async (_req, res) => {
+  const startedAt = Date.now();
   try {
-    const data = await withCache("intelligence", INTELLIGENCE_TTL, getIntelligencePayload, {
-      allowStaleOnError: true,
-    });
-    res.json(data);
+    const result = await withStaleWhileRevalidate(
+      "intelligence",
+      INTELLIGENCE_TTL,
+      getIntelligencePayload,
+      { allowStaleOnError: true }
+    );
+    logEndpointTiming("intelligence", startedAt, result.cacheStatus);
+    res.json(result.value);
   } catch (error) {
+    logEndpointTiming("intelligence", startedAt, "error");
     console.error("Intelligence endpoint failed:", error);
     res.status(500).json({ ok: false, error: "Failed to load intelligence data" });
   }
@@ -5141,14 +5231,16 @@ app.get("/api/health", async (_req, res) => {
 });
 
 async function warmCoreSnapshots() {
+  const startedAt = Date.now();
   try {
     await Promise.allSettled([
-      withCache("dashboard", DASHBOARD_TTL, getDashboardPayload, { allowStaleOnError: true }),
-      withCache("market-data", MARKET_DATA_TTL, getMarketDataPayload, { allowStaleOnError: true }),
-      withCache("order-flow", ORDER_FLOW_TTL, getOrderFlowPayload, { allowStaleOnError: true }),
-      withCache("market-advanced", MARKET_ADVANCED_TTL, getMarketAdvancedPayload, { allowStaleOnError: true }),
-      withCache("intelligence", INTELLIGENCE_TTL, getIntelligencePayload, { allowStaleOnError: true }),
+      refreshCacheInBackground("dashboard", DASHBOARD_TTL, getDashboardPayload, { allowStaleOnError: true }),
+      refreshCacheInBackground("market-data", MARKET_DATA_TTL, getMarketDataPayload, { allowStaleOnError: true }),
+      refreshCacheInBackground("order-flow", ORDER_FLOW_TTL, getOrderFlowPayload, { allowStaleOnError: true }),
+      refreshCacheInBackground("market-advanced", MARKET_ADVANCED_TTL, getMarketAdvancedPayload, { allowStaleOnError: true }),
+      refreshCacheInBackground("intelligence", INTELLIGENCE_TTL, getIntelligencePayload, { allowStaleOnError: true }),
     ]);
+    console.log(`[PERF] warmCoreSnapshots ${Date.now() - startedAt}ms`);
   } catch (error) {
     console.warn("Snapshot warmup failed:", error.message);
   }
@@ -5159,9 +5251,12 @@ app.listen(PORT, () => {
 
   warmCoreSnapshots();
 
+  // Keep snapshots warm, but avoid hammering upstream APIs every 30 seconds.
+  // User requests still trigger an immediate background refresh whenever a
+  // snapshot has expired, while receiving the last valid data instantly.
   setInterval(() => {
     warmCoreSnapshots();
-  }, 30 * 1000);
+  }, 60 * 1000);
 
   setTimeout(() => {
     processPushSignals();
