@@ -299,6 +299,44 @@ function logEndpointTiming(name, startedAt, cacheStatus) {
   console.log(`[PERF] ${name} ${durationMs}ms cache=${cacheStatus || "unknown"}`);
 }
 
+// Keeps the visible BTC price synchronized across all main screens without
+// changing any screen's analytical calculations. Cached screen payloads may
+// contain an older price, so the response overlays only the latest shared
+// Binance ticker price at send time.
+function getUnifiedDisplayTicker() {
+  const freshTicker = getCache("binance_ticker_24h");
+  const latestTicker =
+    freshTicker ||
+    getCache("binance_ticker_24h", true) ||
+    LAST_GOOD_TICKER;
+
+  if (!freshTicker) {
+    fetchBinanceTicker24h().catch((error) => {
+      console.warn("Unified display price refresh failed:", error.message);
+    });
+  }
+
+  return isValidTicker(latestTicker) ? latestTicker : null;
+}
+
+function withUnifiedDisplayPrice(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+
+  const ticker = getUnifiedDisplayTicker();
+  const latestPrice = number(ticker?.lastPrice, null);
+
+  if (!Number.isFinite(latestPrice) || latestPrice <= 0) {
+    return payload;
+  }
+
+  return {
+    ...payload,
+    price: latestPrice,
+  };
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -5045,7 +5083,7 @@ app.get("/api/dashboard", async (_req, res) => {
       { allowStaleOnError: true }
     );
     logEndpointTiming("dashboard", startedAt, result.cacheStatus);
-    res.json(result.value);
+    res.json(withUnifiedDisplayPrice(result.value));
   } catch (error) {
     logEndpointTiming("dashboard", startedAt, "error");
     console.error("Dashboard endpoint failed:", error);
@@ -5063,7 +5101,7 @@ app.get("/api/market-data", async (_req, res) => {
       { allowStaleOnError: true }
     );
     logEndpointTiming("market-data", startedAt, result.cacheStatus);
-    res.json(result.value);
+    res.json(withUnifiedDisplayPrice(result.value));
   } catch (error) {
     logEndpointTiming("market-data", startedAt, "error");
     console.error("Market data endpoint failed:", error);
@@ -5081,7 +5119,7 @@ app.get("/api/order-flow", async (_req, res) => {
       { allowStaleOnError: true }
     );
     logEndpointTiming("order-flow", startedAt, result.cacheStatus);
-    res.json(result.value);
+    res.json(withUnifiedDisplayPrice(result.value));
   } catch (error) {
     logEndpointTiming("order-flow", startedAt, "error");
     console.error("Order flow endpoint failed:", error);
@@ -5099,7 +5137,7 @@ app.get("/api/market-advanced", async (_req, res) => {
       { allowStaleOnError: true }
     );
     logEndpointTiming("market-advanced", startedAt, result.cacheStatus);
-    res.json(result.value);
+    res.json(withUnifiedDisplayPrice(result.value));
   } catch (error) {
     logEndpointTiming("market-advanced", startedAt, "error");
     console.error("Market advanced endpoint failed:", error);
@@ -5117,7 +5155,7 @@ app.get("/api/intelligence", async (_req, res) => {
       { allowStaleOnError: true }
     );
     logEndpointTiming("intelligence", startedAt, result.cacheStatus);
-    res.json(result.value);
+    res.json(withUnifiedDisplayPrice(result.value));
   } catch (error) {
     logEndpointTiming("intelligence", startedAt, "error");
     console.error("Intelligence endpoint failed:", error);
