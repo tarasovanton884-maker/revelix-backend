@@ -1725,43 +1725,82 @@ async function sendPushNotification(type, options = {}) {
 
   const [title, body] = getNextPushVariant(type);
 
-  const messages = eligibleRows.map((row) => ({
-    to: row.token,
-    sound: "default",
-    title,
-    body,
-  }));
+  // Expo Push API accepts at most 100 notifications in one request.
+  // Send larger audiences in chunks while preserving the row-to-ticket mapping.
+  const EXPO_PUSH_BATCH_SIZE = 100;
+  let successfulSends = 0;
 
   try {
-    const response = await fetch("https://exp.host/--/api/v2/push/send", {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Accept-Encoding": "gzip, deflate",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(messages),
-    });
+    for (let offset = 0; offset < eligibleRows.length; offset += EXPO_PUSH_BATCH_SIZE) {
+      const batchRows = eligibleRows.slice(offset, offset + EXPO_PUSH_BATCH_SIZE);
+      const messages = batchRows.map((row) => ({
+        to: row.token,
+        sound: "default",
+        title,
+        body,
+      }));
 
-    const result = await response.json();
-    console.log("Push send result:", JSON.stringify(result));
+      const response = await fetch("https://exp.host/--/api/v2/push/send", {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Accept-Encoding": "gzip, deflate",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(messages),
+      });
 
-    if (Array.isArray(result?.data)) {
-      for (let i = 0; i < result.data.length; i += 1) {
-        const item = result.data[i];
-        const row = eligibleRows[i];
+      const result = await response.json().catch(() => null);
+
+      console.log(
+        `Push send batch ${Math.floor(offset / EXPO_PUSH_BATCH_SIZE) + 1} ` +
+        `(${batchRows.length} token(s)):`,
+        JSON.stringify(result)
+      );
+
+      if (!response.ok) {
+        console.error(
+          `Expo push batch failed with HTTP ${response.status}:`,
+          JSON.stringify(result)
+        );
+        continue;
+      }
+
+      const tickets = Array.isArray(result?.data)
+        ? result.data
+        : result?.data
+          ? [result.data]
+          : [];
+
+      for (let i = 0; i < tickets.length; i += 1) {
+        const item = tickets[i];
+        const row = batchRows[i];
         if (!row) continue;
 
         if (item?.status === "ok") {
+          successfulSends += 1;
           await markTokenSent(row.id, type);
-        } else if (item?.status === "error" && item?.details?.error === "DeviceNotRegistered") {
+        } else if (
+          item?.status === "error" &&
+          item?.details?.error === "DeviceNotRegistered"
+        ) {
           await removeTokenByRowId(row.id);
           console.log("Removed unregistered token:", row.token);
+        } else if (item?.status === "error") {
+          console.error(
+            "Expo rejected push token:",
+            row.token,
+            item?.message || item?.details?.error || "Unknown error"
+          );
         }
       }
     }
 
-    return true;
+    console.log(
+      `Push delivery finished: ${successfulSends}/${eligibleRows.length} accepted by Expo`
+    );
+
+    return successfulSends > 0;
   } catch (error) {
     console.error("Push send failed:", error);
     return false;
