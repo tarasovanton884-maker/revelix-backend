@@ -103,6 +103,15 @@ const INTELLIGENCE_STATE = {
   bootstrapped: false,
 };
 
+
+const WYCKOFF_STATE = {
+  stablePhase: null,
+  pendingPhase: null,
+  pendingPhaseCount: 0,
+  lastEvaluationAt: 0,
+  lastCommitAt: 0,
+};
+
 const PUSH_TEXTS = {
   signal_up: [
     ["New market read available", "Revelix updated the latest investor view."],
@@ -1548,6 +1557,92 @@ const DASHBOARD_MIN_TREND_CHANGE_MS = 10 * 60 * 1000;
 const MEDIUM_TERM_REGIME_CONFIRMATION_SNAPSHOTS = 3;
 const MEDIUM_TERM_REGIME_EVALUATION_MS = 10 * 60 * 1000;
 const MEDIUM_TERM_MIN_REGIME_CHANGE_MS = 30 * 60 * 1000;
+
+
+// Wyckoff is a faster timing/context layer than the macro cycle, but it should
+// not flip on one borderline snapshot. Strong evidence can still confirm faster.
+const WYCKOFF_CONFIRMATION_SNAPSHOTS = 3;
+const WYCKOFF_DIRECT_OPPOSITE_CONFIRMATION_SNAPSHOTS = 4;
+const WYCKOFF_LOW_GAP_CONFIRMATION_SNAPSHOTS = 4;
+const WYCKOFF_EVALUATION_MS = 2 * 60 * 1000;
+const WYCKOFF_MIN_PHASE_CHANGE_MS = 5 * 60 * 1000;
+const WYCKOFF_LOW_GAP_THRESHOLD = 1.0;
+const WYCKOFF_STRONG_GAP_THRESHOLD = 2.2;
+
+function isDirectOppositeWyckoffFlip(fromPhase, toPhase) {
+  return (
+    (fromPhase === "Distribution" && toPhase === "Markup") ||
+    (fromPhase === "Markup" && toPhase === "Distribution") ||
+    (fromPhase === "Accum Zone" && toPhase === "Markdown") ||
+    (fromPhase === "Markdown" && toPhase === "Accum Zone")
+  );
+}
+
+function applyWyckoffPhaseConfirmation(candidatePhase, scoreGap, now = Date.now()) {
+  if (!candidatePhase) {
+    return WYCKOFF_STATE.stablePhase || "Accum Zone";
+  }
+
+  if (!WYCKOFF_STATE.stablePhase) {
+    WYCKOFF_STATE.stablePhase = candidatePhase;
+    WYCKOFF_STATE.lastEvaluationAt = now;
+    WYCKOFF_STATE.lastCommitAt = now;
+    return candidatePhase;
+  }
+
+  const currentStable = WYCKOFF_STATE.stablePhase;
+
+  if (candidatePhase === currentStable) {
+    WYCKOFF_STATE.pendingPhase = null;
+    WYCKOFF_STATE.pendingPhaseCount = 0;
+    return currentStable;
+  }
+
+  if (now - (WYCKOFF_STATE.lastEvaluationAt || 0) < WYCKOFF_EVALUATION_MS) {
+    return currentStable;
+  }
+
+  WYCKOFF_STATE.lastEvaluationAt = now;
+
+  if (WYCKOFF_STATE.pendingPhase === candidatePhase) {
+    WYCKOFF_STATE.pendingPhaseCount += 1;
+  } else {
+    WYCKOFF_STATE.pendingPhase = candidatePhase;
+    WYCKOFF_STATE.pendingPhaseCount = 1;
+  }
+
+  const directOpposite = isDirectOppositeWyckoffFlip(currentStable, candidatePhase);
+  const lowGap = Number.isFinite(scoreGap) && scoreGap < WYCKOFF_LOW_GAP_THRESHOLD;
+  const strongGap = Number.isFinite(scoreGap) && scoreGap >= WYCKOFF_STRONG_GAP_THRESHOLD;
+
+  let requiredSnapshots = WYCKOFF_CONFIRMATION_SNAPSHOTS;
+  if (directOpposite || lowGap) {
+    requiredSnapshots = WYCKOFF_DIRECT_OPPOSITE_CONFIRMATION_SNAPSHOTS;
+  }
+  if (lowGap) {
+    requiredSnapshots = Math.max(requiredSnapshots, WYCKOFF_LOW_GAP_CONFIRMATION_SNAPSHOTS);
+  }
+
+  // A genuinely decisive score gap may confirm one snapshot sooner, but never
+  // instantly. This preserves responsiveness without allowing noisy flips.
+  if (strongGap && !lowGap) {
+    requiredSnapshots = Math.max(2, requiredSnapshots - 1);
+  }
+
+  const enoughSnapshots = WYCKOFF_STATE.pendingPhaseCount >= requiredSnapshots;
+  const enoughTime =
+    now - (WYCKOFF_STATE.lastCommitAt || 0) >= WYCKOFF_MIN_PHASE_CHANGE_MS;
+
+  if (enoughSnapshots && enoughTime) {
+    WYCKOFF_STATE.stablePhase = candidatePhase;
+    WYCKOFF_STATE.pendingPhase = null;
+    WYCKOFF_STATE.pendingPhaseCount = 0;
+    WYCKOFF_STATE.lastCommitAt = now;
+    return candidatePhase;
+  }
+
+  return currentStable;
+}
 
 const BTC_CIRCULATING_SUPPLY = 19_600_000;
 
@@ -3852,25 +3947,45 @@ function getWyckoffEngine(perf7d, perf30d, perf90d, rangePos30, rangePos90, atr1
   markdownScore += rangePos30 < 40 ? 1.6 : 0;
   markdownScore += perf7d < 0 ? 0.8 : 0;
   markdownScore += atr14Pct >= atr30Pct ? 1.0 : 0;
+
   const scored = [
     { phase: "Accum Zone", score: accumulationScore, note: "The market looks more like a lower-range absorption environment where supply may be getting processed rather than a clean trend phase." },
     { phase: "Markup", score: markupScore, note: "Momentum, range position and follow-through suggest the market is behaving more like an advancing markup phase." },
     { phase: "Distribution", score: distributionScore, note: "The market is elevated in range position and follow-through is fading, which can fit a distribution-style environment." },
     { phase: "Markdown", score: markdownScore, note: "Negative momentum and weak range position suggest the market is behaving more like a markdown phase than a stable base." },
   ].sort((a, b) => b.score - a.score);
+
   const best = scored[0], second = scored[1], gap = best.score - second.score;
+  const stablePhase = applyWyckoffPhaseConfirmation(best.phase, gap);
+  const stableResult = scored.find((item) => item.phase === stablePhase) || best;
+  const phasePending = stablePhase !== best.phase;
+
   let confidence = "Low";
-  if (gap >= 2.2) confidence = "High";
-  else if (gap >= 1.0) confidence = "Medium";
+  if (!phasePending) {
+    if (gap >= 2.2) confidence = "High";
+    else if (gap >= 1.0) confidence = "Medium";
+  }
+
   let stage = "Developing";
-  if (best.phase === "Accum Zone") stage = rangePos30 < 28 ? "Early" : rangePos30 < 45 ? "Mature" : "Late";
-  else if (best.phase === "Markup") stage = perf7d > 0 && perf30d > 8 ? "Expanding" : "Early";
-  else if (best.phase === "Distribution") stage = perf7d < 0 ? "Mature" : "Early";
-  else if (best.phase === "Markdown") stage = perf30d < -10 ? "Expanding" : "Early";
+  if (stablePhase === "Accum Zone") stage = rangePos30 < 28 ? "Early" : rangePos30 < 45 ? "Mature" : "Late";
+  else if (stablePhase === "Markup") stage = perf7d > 0 && perf30d > 8 ? "Expanding" : "Early";
+  else if (stablePhase === "Distribution") stage = perf7d < 0 ? "Mature" : "Early";
+  else if (stablePhase === "Markdown") stage = perf30d < -10 ? "Expanding" : "Early";
+
   const rangeState = rangePos30 < 35 ? "Lower Range" : rangePos30 > 65 ? "Upper Range" : "Mid Range";
   const momentumState = perf30d > 4 && perf7d > 0 ? "Improving" : perf30d < -4 || perf7d < 0 ? "Weakening" : "Mixed";
   const volatilityState = atr14Pct < atr30Pct ? "Contracting" : atr14Pct > atr30Pct * 1.08 ? "Expanding" : "Stable";
-  return { phase: best.phase, confidence, stage, rangeState, momentumState, volatilityState, note: best.note, scoreGap: gap };
+
+  return {
+    phase: stablePhase,
+    confidence,
+    stage,
+    rangeState,
+    momentumState,
+    volatilityState,
+    note: stableResult.note,
+    scoreGap: gap,
+  };
 }
 
 function getFlowReasoning(upsideDistance, downsideDistance, pressureLabel, trapLong, trapShort, wyckoff, atr14Pct, rangePos30) {
