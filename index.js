@@ -1573,14 +1573,14 @@ function isDirectOppositeWyckoffFlip(fromPhase, toPhase) {
   return (
     (fromPhase === "Distribution" && toPhase === "Markup") ||
     (fromPhase === "Markup" && toPhase === "Distribution") ||
-    (fromPhase === "Accum Zone" && toPhase === "Markdown") ||
-    (fromPhase === "Markdown" && toPhase === "Accum Zone")
+    (fromPhase === "Accumulation" && toPhase === "Markdown") ||
+    (fromPhase === "Markdown" && toPhase === "Accumulation")
   );
 }
 
 function applyWyckoffPhaseConfirmation(candidatePhase, scoreGap, now = Date.now()) {
   if (!candidatePhase) {
-    return WYCKOFF_STATE.stablePhase || "Accum Zone";
+    return WYCKOFF_STATE.stablePhase || "Accumulation";
   }
 
   if (!WYCKOFF_STATE.stablePhase) {
@@ -3838,13 +3838,67 @@ function ofFormatPercent(value) {
 }
 
 function ofBadgeColor(label) {
-  const green = ["Upside Pull", "Demand-Dominant", "Constructive", "Supportive", "Accum Zone", "Markup", "Improving", "Contracting", "Stable", "Constructive Flow", "Short squeeze risk", "Recovery-aligned", "Market-supportive", "Low"];
-  const red = ["Downside Pull", "Supply-Dominant", "Risk-Off", "Fragile", "Markdown", "Distribution", "Weakening", "Expanding", "High", "Fragile Flow", "Crowded upside", "Wait for cleaner reset", "Sell-off aligned", "Risk-sensitive"];
-  const amber = ["Balanced Pull", "Balanced", "Mixed", "Medium", "Building", "Open Space Above", "Open Space Below", "Compressed Above", "Compressed Below", "Neutral", "Upper Range", "Lower Range", "Mid Range", "Mixed Flow", "Stay selective", "Needs broader confirmation", "Developing", "Mature", "Early"];
-  if (green.includes(label)) return "#00d09c";
-  if (red.includes(label)) return "#ff5c5c";
-  if (amber.includes(label)) return "#f5b942";
-  return "#f5b942";
+  const blue = [
+    "Upside Pull",
+    "Demand-Dominant",
+    "Constructive",
+    "Supportive",
+    "Accumulation",
+    "Markup",
+    "Improving",
+    "Strengthening",
+    "Constructive Flow",
+    "Short squeeze risk",
+    "Recovery-aligned",
+    "Market-supportive",
+    "Buyers",
+    "Lower Range",
+  ];
+  const orange = [
+    "Downside Pull",
+    "Supply-Dominant",
+    "Risk-Off",
+    "Fragile",
+    "Markdown",
+    "Distribution",
+    "Weakening",
+    "Deteriorating",
+    "High",
+    "Mature",
+    "Fragile Flow",
+    "Crowded upside",
+    "Wait for cleaner reset",
+    "Sell-off aligned",
+    "Risk-sensitive",
+    "Sellers",
+    "Upper Range",
+  ];
+  const neutral = [
+    "Balanced Pull",
+    "Balanced",
+    "Mixed",
+    "Low",
+    "Medium",
+    "Building",
+    "Open Space Above",
+    "Open Space Below",
+    "Compressed Above",
+    "Compressed Below",
+    "Neutral",
+    "Mid Range",
+    "Mixed Flow",
+    "Stay selective",
+    "Needs broader confirmation",
+    "Developing",
+    "Early",
+    "Contracting",
+    "Stable",
+    "Expanding",
+  ];
+  if (blue.includes(label)) return "#4da3ff";
+  if (orange.includes(label)) return "#ff8a00";
+  if (neutral.includes(label)) return "#a8b3c7";
+  return "#a8b3c7";
 }
 
 function getDensityLabel(distancePct, atr14Pct) {
@@ -3877,11 +3931,11 @@ function buildLiquidityLadder(price, high7d, low7d, high14d, low14d, high30d, lo
   while (rawBelow.length < 3) { const last = rawBelow[rawBelow.length - 1] ?? price; rawBelow.push(Math.max(last * (1 - minimumStepPct / 100), price * 0.5)); }
   const above = rawAbove.slice(0, 3).map((level, index) => {
     const distancePct = ((level - price) / price) * 100;
-    return { label: index === 0 ? "Nearest" : index === 1 ? "Next Cluster" : "Major Cluster", level, distancePct, density: getDensityLabel(distancePct, safeAtr), color: "#ff5c5c" };
+    return { label: index === 0 ? "Nearest" : index === 1 ? "Next Cluster" : "Major Cluster", level, distancePct, density: getDensityLabel(distancePct, safeAtr), color: index === 2 ? "#ff8a00" : "#a8b3c7" };
   });
   const below = rawBelow.slice(0, 3).map((level, index) => {
     const distancePct = ((price - level) / price) * 100;
-    return { label: index === 0 ? "Nearest" : index === 1 ? "Next Cluster" : "Major Cluster", level, distancePct, density: getDensityLabel(distancePct, safeAtr), color: "#00d09c" };
+    return { label: index === 0 ? "Nearest" : index === 1 ? "Next Cluster" : "Major Cluster", level, distancePct, density: getDensityLabel(distancePct, safeAtr), color: index === 2 ? "#ff8a00" : "#a8b3c7" };
   });
   const nearestAbove = above[0]?.distancePct ?? 999;
   const nearestBelow = below[0]?.distancePct ?? 999;
@@ -3949,7 +4003,7 @@ function getWyckoffEngine(perf7d, perf30d, perf90d, rangePos30, rangePos90, atr1
   markdownScore += atr14Pct >= atr30Pct ? 1.0 : 0;
 
   const scored = [
-    { phase: "Accum Zone", score: accumulationScore, note: "The market looks more like a lower-range absorption environment where supply may be getting processed rather than a clean trend phase." },
+    { phase: "Accumulation", score: accumulationScore, note: "The market looks more like a lower-range absorption environment where supply may be getting processed rather than a clean trend phase." },
     { phase: "Markup", score: markupScore, note: "Momentum, range position and follow-through suggest the market is behaving more like an advancing markup phase." },
     { phase: "Distribution", score: distributionScore, note: "The market is elevated in range position and follow-through is fading, which can fit a distribution-style environment." },
     { phase: "Markdown", score: markdownScore, note: "Negative momentum and weak range position suggest the market is behaving more like a markdown phase than a stable base." },
@@ -3967,7 +4021,7 @@ function getWyckoffEngine(perf7d, perf30d, perf90d, rangePos30, rangePos90, atr1
   }
 
   let stage = "Developing";
-  if (stablePhase === "Accum Zone") stage = rangePos30 < 28 ? "Early" : rangePos30 < 45 ? "Mature" : "Late";
+  if (stablePhase === "Accumulation") stage = rangePos30 < 28 ? "Early" : rangePos30 < 45 ? "Mature" : "Late";
   else if (stablePhase === "Markup") stage = perf7d > 0 && perf30d > 8 ? "Expanding" : "Early";
   else if (stablePhase === "Distribution") stage = perf7d < 0 ? "Mature" : "Early";
   else if (stablePhase === "Markdown") stage = perf30d < -10 ? "Expanding" : "Early";
@@ -3994,19 +4048,19 @@ function getFlowReasoning(upsideDistance, downsideDistance, pressureLabel, trapL
   const rangeValue = Number.isFinite(rangePos30) ? `${clamp(rangePos30, 0, 100).toFixed(1)}%` : "—";
 
   return [
-    { label: "Nearest Upside Liquidity", value: upsideValue, color: "#ff5c5c" },
-    { label: "Nearest Downside Liquidity", value: downsideValue, color: "#00d09c" },
+    { label: "Nearest Upside Liquidity", value: upsideValue, color: "#a8b3c7" },
+    { label: "Nearest Downside Liquidity", value: downsideValue, color: "#a8b3c7" },
     { label: "Pressure Regime", value: pressureLabel || "Mixed", color: ofBadgeColor(pressureLabel || "Mixed") },
     { label: "Long Trap Pressure", value: trapLong || "Medium", color: ofBadgeColor(trapLong || "Medium") },
     { label: "Short Trap Pressure", value: trapShort || "Medium", color: ofBadgeColor(trapShort || "Medium") },
     { label: "Wyckoff State", value: wyckoff || "Neutral", color: ofBadgeColor(wyckoff || "Neutral") },
-    { label: "Short-Term Volatility", value: ofFormatPercent(atr14Pct), color: Number.isFinite(atr14Pct) && atr14Pct > 3 ? "#ff5c5c" : "#f5b942" },
-    { label: "30D Range Position", value: rangeValue, color: "#f5b942" },
+    { label: "Short-Term Volatility", value: ofFormatPercent(atr14Pct), color: "#a8b3c7" },
+    { label: "30D Range Position", value: rangeValue, color: Number.isFinite(rangePos30) && rangePos30 < 40 ? "#4da3ff" : Number.isFinite(rangePos30) && rangePos30 > 60 ? "#ff8a00" : "#a8b3c7" },
   ];
 }
 
 function getFlowInterpretation(pressureLabel, wyckoffPhase, longTrap, shortTrap) {
-  if (pressureLabel === "Upside Pull" && (wyckoffPhase === "Accumulation" || wyckoffPhase === "Accum Zone")) return { title: "How to read this signal", flowTone: "Constructive Flow", investorRead: "Recovery-aligned", confirmationNeed: "Market-supportive", body: "The market is showing a constructive combination of lower-range absorption with liquidity attraction above. This does not guarantee immediate upside, but it does suggest the flow layer is becoming more supportive rather than purely defensive." };
+  if (pressureLabel === "Upside Pull" && wyckoffPhase === "Accumulation") return { title: "How to read this signal", flowTone: "Constructive Flow", investorRead: "Recovery-aligned", confirmationNeed: "Market-supportive", body: "The market is showing a constructive combination of lower-range absorption with liquidity attraction above. This does not guarantee immediate upside, but it does suggest the flow layer is becoming more supportive rather than purely defensive." };
   if (pressureLabel === "Downside Pull" && wyckoffPhase === "Markdown") return { title: "How to read this signal", flowTone: "Fragile Flow", investorRead: "Sell-off aligned", confirmationNeed: "Risk-sensitive", body: "The market still looks vulnerable. Downside liquidity remains more actionable and the flow structure behaves more like markdown than stabilisation." };
   if (longTrap === "High") return { title: "How to read this signal", flowTone: "Fragile Flow", investorRead: "Crowded upside", confirmationNeed: "Wait for cleaner reset", body: "The market is stretched enough for long-side crowding risk to matter. Even if the bigger trend remains positive, weak short-term follow-through can still punish late buyers." };
   if (shortTrap === "High") return { title: "How to read this signal", flowTone: "Constructive Flow", investorRead: "Short squeeze risk", confirmationNeed: "Needs macro support", body: "The market is depressed enough for short-side crowding risk to matter. This does not confirm a bigger reversal, but it does raise the probability of a squeeze or local rebound first." };
@@ -4014,7 +4068,7 @@ function getFlowInterpretation(pressureLabel, wyckoffPhase, longTrap, shortTrap)
 }
 
 function getMarketLink(pressureLabel, wyckoffPhase) {
-  if (pressureLabel === "Upside Pull" && (wyckoffPhase === "Accumulation" || wyckoffPhase === "Accum Zone" || wyckoffPhase === "Markup")) return ["Use Market to check whether the broader phase also supports recovery or accumulation.", "Use Intelligence to confirm if Investor Attractiveness remains strong while flow improves.", "Watch whether Risk Level stays constructive as liquidity pressure leans upward."];
+  if (pressureLabel === "Upside Pull" && (wyckoffPhase === "Accumulation" || wyckoffPhase === "Markup")) return ["Use Market to check whether the broader phase also supports recovery or accumulation.", "Use Intelligence to confirm if Investor Attractiveness remains strong while flow improves.", "Watch whether Risk Level stays constructive as liquidity pressure leans upward."];
   if (pressureLabel === "Downside Pull" || wyckoffPhase === "Markdown") return ["Use Market to confirm whether the cycle still leans toward sell-off risk rather than confirmed bottoming.", "Use Intelligence to check whether Risk Level is deteriorating with the weaker flow picture.", "Watch if Investor Bias weakens as downside liquidity remains more actionable."];
   return ["Use Market to confirm whether the macro phase is improving or still mixed.", "Use Intelligence to check whether attractiveness and risk remain aligned with this flow backdrop.", "Treat this screen as the timing layer, not the only layer."];
 }
@@ -4777,6 +4831,192 @@ function intelGetIntelligenceComment(regime, bias, risk, zone, score) {
   return "Focus on price location first, then on participation quality.";
 }
 
+
+function intelGetMarketRegimeMeaning(regime, flowPulseLabel, shortTermRegime) {
+  if (regime === "Bull Expansion") {
+    if (flowPulseLabel === "Bullish Pulse") {
+      return "Price and live participation are expanding together. The environment is supportive, but entry quality still depends on valuation and risk.";
+    }
+    if (flowPulseLabel === "Bearish Pulse") {
+      return "Price remains in expansion, but live participation has weakened. Momentum is still positive, though the move has less confirmation than the headline regime suggests.";
+    }
+    return "Price is expanding, but live participation is mixed. The backdrop is constructive without offering a fully confirmed short-term edge.";
+  }
+
+  if (regime === "Bear Pressure") {
+    if (flowPulseLabel === "Bearish Pulse" || shortTermRegime === "Bearish") {
+      return "Price pressure and short-term participation are aligned to the downside. Capital preservation matters more until selling pressure begins to stabilize.";
+    }
+    if (flowPulseLabel === "Bullish Pulse") {
+      return "The broader environment is still under pressure, while live buying is attempting to stabilize the move. This is an early response, not yet a confirmed recovery.";
+    }
+    return "The market remains under pressure, but live participation is mixed rather than decisively bearish. Confirmation is still needed before treating the weakness as resolved.";
+  }
+
+  if (flowPulseLabel === "Bullish Pulse" && shortTermRegime === "Bullish") {
+    return "The broader environment is balanced, while short-term participation leans constructive. This can improve the setup, but it is not the same as a confirmed expansion regime.";
+  }
+  if (flowPulseLabel === "Bearish Pulse" && shortTermRegime === "Bearish") {
+    return "The broader environment is balanced, but short-term participation has turned defensive. The setup is not structurally broken, though near-term pressure deserves respect.";
+  }
+  return "The market is balanced and neither side has a decisive edge. Patience is more useful than forcing a directional conclusion.";
+}
+
+function intelGetInvestmentOutlookMeaning(stableBias, confidenceState, flowPulse) {
+  const biasLabel = stableBias?.label || "Neutral Bias";
+  const confidenceLabel = confidenceState?.label || "Weak Edge";
+  const flowLabel = flowPulse?.label || "Neutral Pulse";
+
+  if (biasLabel === "Accumulation Bias") {
+    if (flowLabel === "Bullish Pulse") {
+      return confidenceLabel === "Strong" || confidenceLabel === "Confirmed"
+        ? "The broader accumulation bias is supported by constructive live participation. The setup has confirmation, but disciplined entries still matter more than chasing."
+        : "The broader setup favors accumulation and live flow is improving, but conviction is still developing. Treat this as constructive rather than fully confirmed.";
+    }
+    if (flowLabel === "Bearish Pulse") {
+      return "The broader setup still favors accumulation, but current live flow is working against it. Long-term value may remain intact while short-term timing stays fragile.";
+    }
+    return "The broader setup favors patient accumulation, while live participation remains mixed. The thesis is constructive, but stronger flow would improve conviction.";
+  }
+
+  if (biasLabel === "Distribution Risk") {
+    if (flowLabel === "Bearish Pulse") {
+      return "The broader bias and current live flow both favor caution. Risk control should take priority until participation and structure begin to improve.";
+    }
+    if (flowLabel === "Bullish Pulse") {
+      return "Live buying has improved, but the broader bias still favors risk control. The bounce is not enough by itself to overturn the wider distribution risk.";
+    }
+    return "The broader setup favors risk control and live participation is not strong enough to challenge that view. Patience is preferable to adding exposure aggressively.";
+  }
+
+  if (flowLabel === "Bullish Pulse") {
+    return "The broader investor bias is neutral, while live participation leans positive. This is an improving short-term signal, but not yet a durable accumulation thesis.";
+  }
+  if (flowLabel === "Bearish Pulse") {
+    return "The broader investor bias is neutral, while live participation leans defensive. The setup calls for patience until flow and structure provide a clearer edge.";
+  }
+  return "Both the broader bias and live participation are mixed. There is no strong reason to force exposure or risk reduction from this block alone.";
+}
+
+function intelGetRiskOutlookMeaning({
+  riskState,
+  riskLevel,
+  earlyRisk,
+  currentZone,
+  whaleSignal,
+  shortTermRegime,
+}) {
+  const warningLabel = earlyRisk?.label || "Risk Stable";
+  const whaleLabel = whaleSignal?.label || "Low Big-Player Activity";
+
+  if (riskState === "Late Pump Risk") {
+    return warningLabel === "Risk Active"
+      ? "Price is extended in structure while multiple warning inputs are active. The risk is not only theoretical, so protecting capital matters more than chasing upside."
+      : "Price is extended in structure and the setup is vulnerable to late-cycle weakness. Even without a fully active warning, the margin for error is small.";
+  }
+
+  if (riskState === "Elevated Risk") {
+    return warningLabel === "Risk Active" || warningLabel === "Risk Rising"
+      ? "The market is expensive enough for downside sensitivity to matter, and early warning inputs are confirming that risk is building. New exposure requires tighter selectivity."
+      : "The setup carries elevated structural risk because price is no longer in a favorable value area. Warnings are contained for now, but the risk profile remains asymmetric.";
+  }
+
+  if (riskState === "Watchful Structure") {
+    if (whaleLabel === "Sell-Side Big-Player Flow" || shortTermRegime === "Bearish") {
+      return "The broader structure is not fully broken, but sell-side participation or bearish short-term pressure is weakening the setup. Risk is manageable only while deterioration remains contained.";
+    }
+    return "The setup is neither clearly constructive nor decisively broken. Risk remains moderate because confirmation is weak and the market still needs a cleaner structural signal.";
+  }
+
+  if (riskState === "Constructive but Fragile") {
+    if (warningLabel === "Risk Rising" || warningLabel === "Risk Active") {
+      return "Price location remains constructive, but weak participation and rising warning signals make the setup fragile. The value case is still present, while timing risk has increased.";
+    }
+    return "Price location remains constructive, but participation is not strong enough to remove fragility. Risk is contained for now, though the setup still needs confirmation.";
+  }
+
+  if (riskState === "Constructive Structure") {
+    if (warningLabel === "Risk Stable") {
+      return "Price location and the broader structure remain supportive, while early deterioration signals are limited. The setup is constructive without being risk-free.";
+    }
+    return "The structure remains constructive, but early warning inputs are beginning to rise. The thesis still holds, though confirmation should be monitored more closely.";
+  }
+
+  if (riskState === "Accumulation Opportunity") {
+    if (warningLabel === "Risk Stable") {
+      return "Price location, structure and participation are aligned well enough to create a lower-risk accumulation environment. The opportunity is favorable, but position sizing still matters.";
+    }
+    return "The market remains in a favorable accumulation area, but early warning inputs have not fully cleared. The opportunity is attractive with more timing risk than the headline state suggests.";
+  }
+
+  if (riskState === "Neutral Structure") {
+    return warningLabel === "Risk Active"
+      ? "The broader structure is neutral, but active warning inputs raise downside sensitivity. The environment is not decisively bearish, though caution is justified."
+      : "The broader structure is neutral and risk is moderate. There is no strong breakdown signal, but there is also no clear reason to treat the setup as low risk.";
+  }
+
+  return `The current setup is classified as ${riskState} with ${riskLevel}. Risk should be read together with price location, participation and early warning conditions.`;
+}
+
+function intelGetStructuralOutlookMeaning({
+  shortTermRegime,
+  mediumTermRegime,
+  longTermRegime,
+  currentZone,
+}) {
+  const shortBearish = shortTermRegime === "Bearish";
+  const shortBullish = shortTermRegime === "Bullish";
+  const mediumDefensive = mediumTermRegime === "Distribution Phase";
+  const mediumConstructive =
+    mediumTermRegime === "Accumulation Phase" ||
+    mediumTermRegime === "Re-Accumulation";
+  const longExtended = longTermRegime === "Overextended Cycle";
+  const inValue =
+    currentZone === "Deep Value Zone" ||
+    currentZone === "Accumulation Zone";
+  const expensive =
+    currentZone === "Premium Zone" ||
+    currentZone === "Overheated Zone";
+
+  if (mediumDefensive && shortBearish) {
+    if (inValue) {
+      return "Price is in a favorable long-term zone, but short- and medium-term structure remain defensive. Valuation is improving faster than confirmation.";
+    }
+    return "Short- and medium-term structure are aligned defensively. The market needs stabilization before the broader framework can be treated as constructive.";
+  }
+
+  if (mediumConstructive && !shortBearish) {
+    if (inValue) {
+      return "The market is in a favorable value zone and medium-term structure is improving. Short-term conditions are not working against the broader accumulation case.";
+    }
+    return "Medium-term structure is constructive and short-term conditions are supportive, but price is no longer in the strongest value area.";
+  }
+
+  if (longExtended && expensive) {
+    return "The long-term cycle is extended and price sits in an expensive structural zone. Even supportive short-term action carries a smaller margin for error.";
+  }
+
+  if (shortBullish && mediumTermRegime === "Transition Phase") {
+    return "Short-term conditions are improving, while medium-term structure is still transitional. The move is constructive, but broader confirmation has not arrived yet.";
+  }
+
+  if (shortBearish && mediumTermRegime === "Transition Phase") {
+    return inValue
+      ? "Short-term pressure remains bearish, while medium-term structure is transitional inside a favorable value zone. The long-term location is improving before timing has stabilized."
+      : "Short-term pressure is bearish and medium-term structure remains transitional. The market has not yet produced a clean structural recovery.";
+  }
+
+  if (inValue) {
+    return "Price is in a favorable long-term zone, but timeframe alignment is still mixed. The location is constructive while timing remains selective.";
+  }
+
+  if (expensive) {
+    return "Price is in an expensive structural zone and timeframe alignment is mixed. Upside can continue, but the setup offers less protection if momentum weakens.";
+  }
+
+  return "Timeframes are not fully aligned and price sits near the middle of its broader structure. The environment is balanced rather than decisively attractive or defensive.";
+}
+
 function intelMapBiasLabel(backendBias) {
   if (backendBias === "Accumulation" || backendBias === "Accumulation Bias" || backendBias === "Deep Value") return "Accumulation Bias";
   if (backendBias === "Distribution Risk") return "Distribution Risk";
@@ -4841,7 +5081,67 @@ function buildIntelligenceModel(payload) {
   const linkToMarket = intelGetLinkToMarket(riskLevel, currentZone, stableBias.label, earlyRisk.label);
   const zoneExplanation = intelGetZoneExplanation(currentZone);
   const intelligenceComment = intelGetIntelligenceComment(regime, stableBias.label, riskState, currentZone, zoneScore);
-  return { regime, flowPulse, stableBias, confidenceState, whaleSignal, currentZone, structuralZone: { label: currentZone, description: zoneExplanation, levels: { deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper, ma200w, yearlyHigh, yearlyLow } }, riskState, riskLevel, breakdown, zoneScore, attractiveness, shortTermRegime, mediumTermRegime, longTermRegime, earlyRisk, linkToMarket, intelligenceComment, attractivenessModel: { score: zoneScore, label: attractiveness, breakdown, note: "Conservative composite score based mainly on structure, risk and long-term positioning, with only small participation adjustments." }, investorBiasModel: stableBias, whaleFlowModel: whaleSignal };
+  const marketRegimeMeaning = intelGetMarketRegimeMeaning(regime, flowPulse.label, shortTermRegime);
+  const investmentOutlookMeaning = intelGetInvestmentOutlookMeaning(stableBias, confidenceState, flowPulse);
+  const riskOutlookMeaning = intelGetRiskOutlookMeaning({
+    riskState,
+    riskLevel,
+    earlyRisk,
+    currentZone,
+    whaleSignal,
+    shortTermRegime,
+  });
+  const structuralOutlookMeaning = intelGetStructuralOutlookMeaning({
+    shortTermRegime,
+    mediumTermRegime,
+    longTermRegime,
+    currentZone,
+  });
+
+  return {
+    regime,
+    flowPulse,
+    stableBias,
+    confidenceState,
+    whaleSignal,
+    currentZone,
+    structuralZone: {
+      label: currentZone,
+      description: zoneExplanation,
+      levels: {
+        deepValueUpper,
+        accumulationUpper,
+        fairValueUpper,
+        premiumUpper,
+        ma200w,
+        yearlyHigh,
+        yearlyLow,
+      },
+    },
+    riskState,
+    riskLevel,
+    breakdown,
+    zoneScore,
+    attractiveness,
+    shortTermRegime,
+    mediumTermRegime,
+    longTermRegime,
+    earlyRisk,
+    linkToMarket,
+    intelligenceComment,
+    marketRegimeMeaning,
+    investmentOutlookMeaning,
+    riskOutlookMeaning,
+    structuralOutlookMeaning,
+    attractivenessModel: {
+      score: zoneScore,
+      label: attractiveness,
+      breakdown,
+      note: "Conservative composite score based mainly on structure, risk and long-term positioning, with only small participation adjustments.",
+    },
+    investorBiasModel: stableBias,
+    whaleFlowModel: whaleSignal,
+  };
 }
 
 async function getIntelligencePayload() {
