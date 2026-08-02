@@ -2812,6 +2812,14 @@ else if (entryRiskScore >= 2) entryRisk = "Medium";
       action: "Gradual accumulation makes sense here. Add in measured stages rather than trying to time one exact entry.",
       rationale: "Structure, valuation and holder behavior are aligned well enough to support constructive exposure without requiring aggressive full-size positioning.",
     };
+  } else if ((signal === "Buy" || signal === "Strong Buy") && entryRisk === "Medium") {
+    positioning = {
+      title: "Positioning Strategy",
+      stance: "Staged accumulation",
+      intro: "Suggested positioning under current conditions.",
+      action: "Use smaller staged entries rather than committing full size at once. Add only as the setup continues to confirm.",
+      rationale: "The investor signal is positive, but medium entry risk makes gradual exposure more appropriate than aggressive sizing.",
+    };
   } else if (signal === "Constructive") {
     positioning = {
       title: "Positioning Strategy",
@@ -2933,8 +2941,8 @@ function buildDashboardMarketClarity(signal) {
     description = "Structure is forming, but conditions remain mixed. Stay selective.";
   } else {
     level = "High";
-    status = "Clear / Tradable Conditions";
-    description = "Market conditions are clearer. Signals have stronger confirmation.";
+    status = "Clear / Higher-Quality Conditions";
+    description = "Market conditions are clearer, and the current investor read has stronger confirmation.";
   }
 
   if (
@@ -2998,8 +3006,8 @@ function getBadgeColor(label) {
         "Accumulation Zone",
         "Strong Recovery",
         "Improving",
-        "Aggressive Accumulation",
-        "Selective Accumulation",
+        "Active Accumulation",
+        "Selective Positioning",
         "Early Expansion Positioning",
         "Established Bottom",
         "Safe Accumulation",
@@ -3400,27 +3408,33 @@ function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, str
 }
 function getInvestorStance(phase, currentZone, recoveryLabel, perf30d) {
     if (phase === "Macro Bottom") {
+        const strongRecovery = recoveryLabel === "Strong Recovery";
+
         return {
-            headline: recoveryLabel === "Strong Recovery"
+            headline: strongRecovery
                 ? "Early Expansion Positioning"
-                : "Aggressive Accumulation",
-            aggression: recoveryLabel === "Strong Recovery" ? "High" : "Moderate",
+                : "Active Accumulation",
+            aggression: strongRecovery ? "High" : "Moderate",
             deployment: "Gradual but active",
-            strategy: "Scale into strength selectively",
+            strategy: strongRecovery
+                ? "Scale into strength selectively"
+                : "Build exposure gradually",
             riskApproach: "Controlled",
-            note: "Investors typically increase exposure as structure stabilizes near macro value, but still avoid chasing blindly.",
+            note: "Investors can increase exposure as macro value and structure improve, while still avoiding oversized entries or chasing short-term strength.",
         };
     }
+
     if (phase === "Second Sell-Off") {
         return {
-            headline: "Selective Accumulation",
+            headline: "Selective Positioning",
             aggression: perf30d < -5 ? "Very Low" : "Low",
             deployment: "Highly selective",
-            strategy: "Wait for stabilization",
+            strategy: "Add only after stabilization",
             riskApproach: "Strict discipline",
-            note: "This phase often traps early buyers, so selective entries and patience matter more than aggression.",
+            note: "This phase can trap early buyers, so any new exposure should remain small and depend on visible stabilization rather than price alone.",
         };
     }
+
     if (phase === "Peak") {
         return {
             headline: "Reduce Risk",
@@ -3431,6 +3445,7 @@ function getInvestorStance(phase, currentZone, recoveryLabel, perf30d) {
             note: "Asymmetry weakens near peaks, so capital protection often matters more than forcing new upside entries.",
         };
     }
+
     if (phase === "Consolidation") {
         return {
             headline: recoveryLabel === "Improving" ? "Early Positioning" : "Wait & Observe",
@@ -3441,6 +3456,7 @@ function getInvestorStance(phase, currentZone, recoveryLabel, perf30d) {
             note: "Markets often fake direction during consolidation, so patient positioning usually beats emotional conviction.",
         };
     }
+
     return {
         headline: "Measured Caution",
         aggression: "Low",
