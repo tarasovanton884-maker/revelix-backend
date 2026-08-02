@@ -3072,12 +3072,12 @@ function getCurrentZone(price, deepValueUpper, accumulationUpper, fairValueUpper
 }
 function getValueContext(currentZone) {
     if (currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone") {
-        return { label: "Value-Rich" };
+        return { label: "Value-Rich", color: "#00d09c" };
     }
     if (currentZone === "Premium Zone" || currentZone === "Overheated Zone") {
-        return { label: "Expensive" };
+        return { label: "Expensive", color: "#ff5c5c" };
     }
-    return { label: "Neutral" };
+    return { label: "Neutral", color: "#f5b942" };
 }
 function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, currentZone, perf30d, perf90d) {
     if (![price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, perf30d, perf90d].every(Number.isFinite) || yearlyHigh <= yearlyLow || price <= 0) {
@@ -3555,7 +3555,7 @@ function buildMarketCyclePayload(data) {
   ) {
     return {
       currentZone: "—",
-      valueContext: { label: "—" },
+      valueContext: { label: "—", color: "#f5b942" },
       cyclePhase: { phase: "—", confidence: "—", desc: "Market cycle data is temporarily unavailable.", scoreGap: null },
       recoveryStatus: { label: "—", note: "Recovery data is temporarily unavailable." },
       phaseStage: "—",
