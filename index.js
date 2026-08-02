@@ -3072,12 +3072,12 @@ function getCurrentZone(price, deepValueUpper, accumulationUpper, fairValueUpper
 }
 function getValueContext(currentZone) {
     if (currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone") {
-        return { label: "Value-Rich", color: "#00d09c" };
+        return { label: "Value-Rich" };
     }
     if (currentZone === "Premium Zone" || currentZone === "Overheated Zone") {
-        return { label: "Expensive", color: "#ff5c5c" };
+        return { label: "Expensive" };
     }
-    return { label: "Neutral", color: "#f5b942" };
+    return { label: "Neutral" };
 }
 function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, currentZone, perf30d, perf90d) {
     if (![price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, perf30d, perf90d].every(Number.isFinite) || yearlyHigh <= yearlyLow || price <= 0) {
@@ -3555,7 +3555,7 @@ function buildMarketCyclePayload(data) {
   ) {
     return {
       currentZone: "—",
-      valueContext: { label: "—", color: "#f5b942" },
+      valueContext: { label: "—" },
       cyclePhase: { phase: "—", confidence: "—", desc: "Market cycle data is temporarily unavailable.", scoreGap: null },
       recoveryStatus: { label: "—", note: "Recovery data is temporarily unavailable." },
       phaseStage: "—",
@@ -3947,11 +3947,11 @@ function buildLiquidityLadder(price, high7d, low7d, high14d, low14d, high30d, lo
   while (rawBelow.length < 3) { const last = rawBelow[rawBelow.length - 1] ?? price; rawBelow.push(Math.max(last * (1 - minimumStepPct / 100), price * 0.5)); }
   const above = rawAbove.slice(0, 3).map((level, index) => {
     const distancePct = ((level - price) / price) * 100;
-    return { label: index === 0 ? "Nearest" : index === 1 ? "Next Cluster" : "Major Cluster", level, distancePct, density: getDensityLabel(distancePct, safeAtr), color: index === 2 ? "#ff8a00" : "#a8b3c7" };
+    return { label: index === 0 ? "Nearest" : index === 1 ? "Next Cluster" : "Major Cluster", level, distancePct, density: getDensityLabel(distancePct, safeAtr) };
   });
   const below = rawBelow.slice(0, 3).map((level, index) => {
     const distancePct = ((price - level) / price) * 100;
-    return { label: index === 0 ? "Nearest" : index === 1 ? "Next Cluster" : "Major Cluster", level, distancePct, density: getDensityLabel(distancePct, safeAtr), color: index === 2 ? "#ff8a00" : "#a8b3c7" };
+    return { label: index === 0 ? "Nearest" : index === 1 ? "Next Cluster" : "Major Cluster", level, distancePct, density: getDensityLabel(distancePct, safeAtr) };
   });
   const nearestAbove = above[0]?.distancePct ?? 999;
   const nearestBelow = below[0]?.distancePct ?? 999;
@@ -3988,12 +3988,62 @@ function getTrapEngine(perf7d, perf30d, rangePos30, shortVolatilityPct) {
   let shortTrap = "Low";
   let crowdedSide = "Balanced";
   let note = "Trap pressure currently looks balanced, which means neither side appears severely overcrowded.";
-  if (rangePos30 > 72 && perf30d > 6 && perf7d < 0) { longTrap = "High"; shortTrap = "Low"; crowdedSide = "Buyers"; note = "The market is elevated in range position, but shorter momentum is already fading. That often increases the risk of a long-side trap."; }
-  else if (rangePos30 > 62 && perf30d > 4) { longTrap = "Medium"; crowdedSide = "Buyers"; }
-  if (rangePos30 < 32 && perf30d < -6 && perf7d > 0) { shortTrap = "High"; if (longTrap !== "High") longTrap = "Low"; crowdedSide = "Sellers"; note = "The market is depressed in range position, but shorter momentum is trying to improve. That often increases the risk of a short-side trap."; }
-  else if (rangePos30 < 40 && perf30d < -4) { shortTrap = "Medium"; if (crowdedSide === "Balanced") crowdedSide = "Sellers"; }
-  if (shortVolatilityPct > 4.5 && longTrap === "Low" && shortTrap === "Low") { crowdedSide = "Balanced"; note = "Volatility is elevated, so even without a clear crowding signal, fast squeeze risk remains relevant on both sides."; }
-  return { longTrap, shortTrap, crowdedSide, note };
+
+  if (rangePos30 > 72 && perf30d > 6 && perf7d < 0) {
+    longTrap = "High";
+    shortTrap = "Low";
+    crowdedSide = "Buyers";
+    note = "The market is elevated in range position, but shorter momentum is already fading. That often increases the risk of a long-side trap.";
+  } else if (rangePos30 > 62 && perf30d > 4) {
+    longTrap = "Medium";
+    crowdedSide = "Buyers";
+  }
+
+  if (rangePos30 < 32 && perf30d < -6 && perf7d > 0) {
+    shortTrap = "High";
+    if (longTrap !== "High") longTrap = "Low";
+    crowdedSide = "Sellers";
+    note = "The market is depressed in range position, but shorter momentum is trying to improve. That often increases the risk of a short-side trap.";
+  } else if (rangePos30 < 40 && perf30d < -4) {
+    shortTrap = "Medium";
+    if (crowdedSide === "Balanced") crowdedSide = "Sellers";
+  }
+
+  if (shortVolatilityPct > 4.5 && longTrap === "Low" && shortTrap === "Low") {
+    crowdedSide = "Balanced";
+    note = "Volatility is elevated, so even without a clear crowding signal, fast squeeze risk remains relevant on both sides.";
+  }
+
+  const longTrapNote =
+    longTrap === "High"
+      ? "Late buyers are at clear risk here."
+      : longTrap === "Medium"
+        ? "Some risk to late buyers is building."
+        : "No strong risk to late buyers right now.";
+
+  const shortTrapNote =
+    shortTrap === "High"
+      ? "Aggressive shorts are at clear risk here."
+      : shortTrap === "Medium"
+        ? "Some risk to aggressive shorts is building."
+        : "No strong pressure on aggressive shorts right now.";
+
+  const crowdedSideNote =
+    crowdedSide === "Buyers"
+      ? "Buyers look more crowded right now."
+      : crowdedSide === "Sellers"
+        ? "Sellers look more crowded right now."
+        : "Positioning looks balanced right now.";
+
+  return {
+    longTrap,
+    shortTrap,
+    crowdedSide,
+    longTrapNote,
+    shortTrapNote,
+    crowdedSideNote,
+    note,
+  };
 }
 
 function getWyckoffEngine(perf7d, perf30d, perf90d, rangePos30, rangePos90, atr14Pct, atr30Pct) {
@@ -4064,14 +4114,14 @@ function getFlowReasoning(upsideDistance, downsideDistance, pressureLabel, trapL
   const rangeValue = Number.isFinite(rangePos30) ? `${clamp(rangePos30, 0, 100).toFixed(1)}%` : "—";
 
   return [
-    { label: "Nearest Upside Liquidity", value: upsideValue, color: "#a8b3c7" },
-    { label: "Nearest Downside Liquidity", value: downsideValue, color: "#a8b3c7" },
-    { label: "Pressure Regime", value: pressureLabel || "Mixed", color: ofBadgeColor(pressureLabel || "Mixed") },
-    { label: "Long Trap Pressure", value: trapLong || "Medium", color: ofBadgeColor(trapLong || "Medium") },
-    { label: "Short Trap Pressure", value: trapShort || "Medium", color: ofBadgeColor(trapShort || "Medium") },
-    { label: "Wyckoff State", value: wyckoff || "Neutral", color: ofBadgeColor(wyckoff || "Neutral") },
-    { label: "Short-Term Volatility", value: ofFormatPercent(atr14Pct), color: "#a8b3c7" },
-    { label: "30D Range Position", value: rangeValue, color: Number.isFinite(rangePos30) && rangePos30 < 40 ? "#4da3ff" : Number.isFinite(rangePos30) && rangePos30 > 60 ? "#ff8a00" : "#a8b3c7" },
+    { label: "Nearest Upside Liquidity", value: upsideValue },
+    { label: "Nearest Downside Liquidity", value: downsideValue },
+    { label: "Pressure Regime", value: pressureLabel || "Mixed" },
+    { label: "Long Trap Pressure", value: trapLong || "Medium" },
+    { label: "Short Trap Pressure", value: trapShort || "Medium" },
+    { label: "Wyckoff State", value: wyckoff || "Neutral" },
+    { label: "Short-Term Volatility", value: ofFormatPercent(atr14Pct) },
+    { label: "30D Range Position", value: rangeValue},
   ];
 }
 
@@ -4090,6 +4140,45 @@ function getMarketLink(pressureLabel, wyckoffPhase) {
 }
 
 function buildOrderFlowModel(metrics) {
+  const performance = [
+    {
+      label: "7D",
+      value: Number.isFinite(metrics.perf7d) ? metrics.perf7d : null,
+      sub: metrics.perf7d > 0
+        ? "Short-term strength"
+        : metrics.perf7d < 0
+          ? "Short-term pressure"
+          : "Flat short-term",
+    },
+    {
+      label: "30D",
+      value: Number.isFinite(metrics.perf30d) ? metrics.perf30d : null,
+      sub: metrics.perf30d > 0
+        ? "Structure improving"
+        : metrics.perf30d < 0
+          ? "Sell-off pressure"
+          : "Structure mixed",
+    },
+    {
+      label: "90D",
+      value: Number.isFinite(metrics.perf90d) ? metrics.perf90d : null,
+      sub: metrics.perf90d > 0
+        ? "Broader strength"
+        : metrics.perf90d < 0
+          ? "Broader weakness"
+          : "Macro mixed",
+    },
+    {
+      label: "ATR 14",
+      value: Number.isFinite(metrics.atr14Pct) ? metrics.atr14Pct : null,
+      sub: metrics.atr14Pct > 3.5
+        ? "Elevated volatility"
+        : metrics.atr14Pct > 2
+          ? "Moderate volatility"
+          : "Contained volatility",
+    },
+  ];
+
   const hasCoreData = [
     metrics.price,
     metrics.high7d,
@@ -4111,6 +4200,10 @@ function buildOrderFlowModel(metrics) {
     const traps = {
       longTrap: "Medium",
       shortTrap: "Medium",
+      crowdedSide: "Balanced",
+      longTrapNote: "Long-trap pressure cannot be confirmed with incomplete data.",
+      shortTrapNote: "Short-trap pressure cannot be confirmed with incomplete data.",
+      crowdedSideNote: "Positioning cannot be classified until enough fresh data is available.",
       note: "Trap pressure cannot be confirmed until enough fresh structure data is available.",
     };
     const wyckoff = {
@@ -4137,6 +4230,7 @@ function buildOrderFlowModel(metrics) {
       reasoning,
       interpretation,
       marketLink,
+      performance,
     };
   }
 
@@ -4147,7 +4241,7 @@ function buildOrderFlowModel(metrics) {
   const reasoning = getFlowReasoning(ladder.above[0]?.distancePct, ladder.below[0]?.distancePct, pressure.label, traps.longTrap, traps.shortTrap, wyckoff.phase, metrics.atr14Pct, metrics.rangePos30);
   const interpretation = getFlowInterpretation(pressure.label, wyckoff.phase, traps.longTrap, traps.shortTrap);
   const marketLink = getMarketLink(pressure.label, wyckoff.phase);
-  return { ladder, pressure, traps, wyckoff, reasoning, interpretation, marketLink };
+  return { ladder, pressure, traps, wyckoff, reasoning, interpretation, marketLink, performance };
 }
 
 async function getOrderFlowPayload() {
@@ -4251,24 +4345,6 @@ async function getOrderFlowPayload() {
     price,
     change24h,
     dataHealth,
-    high7d,
-    low7d,
-    high14d,
-    low14d,
-    high30d,
-    low30d,
-    high90d,
-    low90d,
-    perf7d,
-    perf30d,
-    perf90d,
-    atr14Pct,
-    atr30Pct,
-    rangePos30,
-    rangePos90,
-    nearTermHigh,
-    nearTermLow,
-    shortVolatilityPct,
     orderFlow,
   };
 }
@@ -4474,9 +4550,9 @@ function intelGetMarketRegime(change24h) {
 function intelGetFlowPulse(buyPressure, sellPressure, change24h) {
   const total = buyPressure + sellPressure;
   const edge = total > 0 ? Math.abs(buyPressure - sellPressure) / total : 0;
-  if (buyPressure > sellPressure && edge > 0.12 && change24h > 0) return { label: "Bullish Pulse", color: "#00d09c", text: "Short-term live participation currently leans to the buy side." };
-  if (sellPressure > buyPressure && edge > 0.12 && change24h < 0) return { label: "Bearish Pulse", color: "#ff5c5c", text: "Short-term live participation currently leans to the sell side." };
-  return { label: "Neutral Pulse", color: "#f5b942", text: "Short-term live participation is mixed right now." };
+  if (buyPressure > sellPressure && edge > 0.12 && change24h > 0) return { label: "Bullish Pulse", text: "Short-term live participation currently leans to the buy side." };
+  if (sellPressure > buyPressure && edge > 0.12 && change24h < 0) return { label: "Bearish Pulse", text: "Short-term live participation currently leans to the sell side." };
+  return { label: "Neutral Pulse", text: "Short-term live participation is mixed right now." };
 }
 
 function intelGetCurrentZone(price, deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper) {
