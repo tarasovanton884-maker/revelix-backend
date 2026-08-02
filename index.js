@@ -1905,16 +1905,17 @@ async function sendPushNotification(type, options = {}) {
 function deriveRiskBucket(intelligence) {
   if (!intelligence) return "medium";
 
+  const model = intelligence.intelligenceModel || {};
   const price = number(intelligence.price);
   const fair = number(intelligence.fairValueUpper);
   const premium = number(intelligence.premiumUpper);
-  const bias = intelligence.investorBias;
+  const bias = model?.stableBias?.label;
 
   if (bias === "Distribution Risk" || (price > premium && premium > 0)) {
     return "high";
   }
 
-  if (bias === "Accumulation" || bias === "Deep Value" || (price <= fair && fair > 0)) {
+  if (bias === "Accumulation Bias" || (price <= fair && fair > 0)) {
     return "low";
   }
 
@@ -4550,9 +4551,16 @@ function intelGetMarketRegime(change24h) {
 function intelGetFlowPulse(buyPressure, sellPressure, change24h) {
   const total = buyPressure + sellPressure;
   const edge = total > 0 ? Math.abs(buyPressure - sellPressure) / total : 0;
-  if (buyPressure > sellPressure && edge > 0.12 && change24h > 0) return { label: "Bullish Pulse", text: "Short-term live participation currently leans to the buy side." };
-  if (sellPressure > buyPressure && edge > 0.12 && change24h < 0) return { label: "Bearish Pulse", text: "Short-term live participation currently leans to the sell side." };
-  return { label: "Neutral Pulse", text: "Short-term live participation is mixed right now." };
+
+  if (buyPressure > sellPressure && edge > 0.12 && change24h > 0) {
+    return { label: "Bullish Pulse" };
+  }
+
+  if (sellPressure > buyPressure && edge > 0.12 && change24h < 0) {
+    return { label: "Bearish Pulse" };
+  }
+
+  return { label: "Neutral Pulse" };
 }
 
 function intelGetCurrentZone(price, deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper) {
@@ -4572,10 +4580,10 @@ function intelGetZoneExplanation(zone) {
 }
 
 function intelGetConfidenceState(confidence) {
-  if (confidence >= 78) return { label: "Strong", note: "The signal has a strong confirmed edge right now." };
-  if (confidence >= 64) return { label: "Confirmed", note: "The signal is confirmed and backed by multiple aligned inputs." };
-  if (confidence >= 52) return { label: "Building", note: "The edge is forming, but it still needs stronger follow-through." };
-  return { label: "Weak Edge", note: "There is some directional edge, but conviction is still limited." };
+  if (confidence >= 78) return { label: "Strong" };
+  if (confidence >= 64) return { label: "Confirmed" };
+  if (confidence >= 52) return { label: "Building" };
+  return { label: "Weak Edge" };
 }
 
 function intelGetWhaleSignal({ largeBuyValue, largeSellValue, whaleBuyValue, whaleSellValue, institutionalBuyValue, institutionalSellValue }) {
@@ -5120,16 +5128,27 @@ function intelBuildStableBiasModel({ backendBias, stableConfidence, pendingBias,
   const pendingLabel = pendingBias ? intelMapBiasLabel(pendingBias) : null;
   const state = pendingLabel && pendingLabel !== mappedLabel ? "Building" : "Stable";
   const confidence = clamp(Math.round(stableConfidence || 58), 42, 88);
-  const note = state === "Building"
-    ? `A possible shift toward ${pendingLabel} is forming, but it needs more confirmed backend snapshots before replacing the stable investor bias.`
-    : mappedLabel === "Accumulation Bias"
-      ? "The broader setup currently favors patient accumulation rather than short-term chasing."
-      : mappedLabel === "Distribution Risk"
-        ? "The broader setup currently favors risk control over adding exposure."
-        : "The broader setup is balanced, so patience matters more than forcing a directional view.";
-  return { label: mappedLabel, confidence, state, pendingLabel, pendingCount: pendingBiasCount || 0, note };
+  return {
+    label: mappedLabel,
+    confidence,
+    state,
+    pendingLabel,
+    pendingCount: pendingBiasCount || 0,
+  };
 }
 
+// Canonical Intelligence API model. Keep only fields rendered by the app or
+// required for cross-screen meaning. Internal scoring and stabilization details
+// stay on the server instead of leaking into the client payload.
+//
+// Stable UI labels emitted by this model:
+// - Flow Pulse: Bullish Pulse | Neutral Pulse | Bearish Pulse
+// - Confidence: Strong | Confirmed | Building | Weak Edge
+// - Whale Activity: Low | Moderate | High | Very High
+// - Whale Direction: Bullish | Balanced | Bearish
+// - Whale Confidence: Low | Medium | High
+// - Flow Strength: Weak | Moderate | Strong | Aggressive
+// The frontend owns presentation colors; the backend owns only canonical meaning.
 function buildIntelligenceModel(payload) {
   const { price, change24h, buyPressure, sellPressure, largeBuyValue, largeSellValue, whaleBuyValue, whaleSellValue, institutionalBuyValue, institutionalSellValue, yearlyHigh, yearlyLow, ma200w, deepValueUpper, accumulationUpper, fairValueUpper, premiumUpper, rawInvestorAttractiveness, investorBias, stableBiasConfidence, flowScore, whaleScore, institutionalScore, pendingBias, pendingBiasCount } = payload;
   const regime = intelGetMarketRegime(change24h);
@@ -5172,7 +5191,6 @@ function buildIntelligenceModel(payload) {
   const earlyRisk = applyEarlyRiskConfirmation(rawEarlyRisk, riskLevel);
   const linkToMarket = intelGetLinkToMarket(riskLevel, currentZone, stableBias.label, earlyRisk.label);
   const zoneExplanation = intelGetZoneExplanation(currentZone);
-  const intelligenceComment = intelGetIntelligenceComment(regime, stableBias.label, riskState, currentZone, zoneScore);
   const marketRegimeMeaning = intelGetMarketRegimeMeaning(regime, flowPulse.label, shortTermRegime);
   const investmentOutlookMeaning = intelGetInvestmentOutlookMeaning(stableBias, confidenceState, flowPulse);
   const riskOutlookMeaning = intelGetRiskOutlookMeaning({
@@ -5192,24 +5210,21 @@ function buildIntelligenceModel(payload) {
 
   return {
     regime,
-    flowPulse,
-    stableBias,
-    confidenceState,
+    flowPulse: {
+      label: flowPulse.label,
+    },
+    stableBias: {
+      label: stableBias.label,
+      confidence: stableBias.confidence,
+      state: stableBias.state,
+      pendingLabel: stableBias.pendingLabel,
+      pendingCount: stableBias.pendingCount,
+    },
+    confidenceState: {
+      label: confidenceState.label,
+    },
     whaleSignal,
     currentZone,
-    structuralZone: {
-      label: currentZone,
-      description: zoneExplanation,
-      levels: {
-        deepValueUpper,
-        accumulationUpper,
-        fairValueUpper,
-        premiumUpper,
-        ma200w,
-        yearlyHigh,
-        yearlyLow,
-      },
-    },
     riskState,
     riskLevel,
     breakdown,
@@ -5218,21 +5233,15 @@ function buildIntelligenceModel(payload) {
     shortTermRegime,
     mediumTermRegime,
     longTermRegime,
-    earlyRisk,
+    earlyRisk: {
+      label: earlyRisk.label,
+      strength: earlyRisk.strength,
+    },
     linkToMarket,
-    intelligenceComment,
     marketRegimeMeaning,
     investmentOutlookMeaning,
     riskOutlookMeaning,
     structuralOutlookMeaning,
-    attractivenessModel: {
-      score: zoneScore,
-      label: attractiveness,
-      breakdown,
-      note: "Conservative composite score based mainly on structure, risk and long-term positioning, with only small participation adjustments.",
-    },
-    investorBiasModel: stableBias,
-    whaleFlowModel: whaleSignal,
   };
 }
 
@@ -5471,17 +5480,6 @@ const dataHealth = getDataHealth([
     change24h,
     dataHealth,
     intelligenceModel,
-    flowScore: Number(flowScore.toFixed(2)),
-    whaleScore: Number(whaleScore.toFixed(2)),
-    institutionalScore: Number(institutionalScore.toFixed(2)),
-    buyPressure,
-    sellPressure,
-    largeBuyValue,
-    largeSellValue,
-    whaleBuyValue,
-    whaleSellValue,
-    institutionalBuyValue,
-    institutionalSellValue,
     yearlyHigh,
     yearlyLow,
     ma200w,
@@ -5489,37 +5487,6 @@ const dataHealth = getDataHealth([
     accumulationUpper,
     fairValueUpper,
     premiumUpper,
-    investorAttractiveness: Number(stableInvestorAttractiveness.toFixed(1)),
-    rawInvestorAttractiveness: Number(rawInvestorAttractiveness.toFixed(1)),
-    investorBias: stableBias,
-    stability: {
-      valuationZone,
-      flowScore: Number(flowScore.toFixed(2)),
-      whaleScore: Number(whaleScore.toFixed(2)),
-      institutionalScore: Number(institutionalScore.toFixed(2)),
-      combinedFlowScore: Number(combinedFlowScore.toFixed(2)),
-      antiFomoAdjusted: intelligenceAntiFomoActive,
-      pendingBias: INTELLIGENCE_STATE.pendingBias,
-      pendingBiasCount: INTELLIGENCE_STATE.pendingBiasCount,
-      stableBias: INTELLIGENCE_STATE.stableBias,
-      stableBiasConfidence: INTELLIGENCE_STATE.stableBiasConfidence,
-      targetBiasConfidence,
-      stableAttractiveness: Number(INTELLIGENCE_STATE.stableAttractiveness.toFixed(1)),
-      rawInvestorAttractiveness: Number(rawInvestorAttractiveness.toFixed(1)),
-      lastBiasCommitAt: INTELLIGENCE_STATE.lastBiasCommitAt
-        ? new Date(INTELLIGENCE_STATE.lastBiasCommitAt).toISOString()
-        : null,
-      lastBiasEvaluationAt: INTELLIGENCE_STATE.lastBiasEvaluationAt
-        ? new Date(INTELLIGENCE_STATE.lastBiasEvaluationAt).toISOString()
-        : null,
-      lastBiasConfidenceCommitAt: INTELLIGENCE_STATE.lastBiasConfidenceCommitAt
-        ? new Date(INTELLIGENCE_STATE.lastBiasConfidenceCommitAt).toISOString()
-        : null,
-      lastAttractivenessCommitAt: INTELLIGENCE_STATE.lastAttractivenessCommitAt
-        ? new Date(INTELLIGENCE_STATE.lastAttractivenessCommitAt).toISOString()
-        : null,
-      lastUpdatedAt: new Date(INTELLIGENCE_STATE.lastUpdatedAt).toISOString(),
-    },
   };
 }
 
