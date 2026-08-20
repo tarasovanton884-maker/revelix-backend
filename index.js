@@ -4709,6 +4709,45 @@ function intelGetRiskLevelDetailed(riskState, currentZone, stableBiasLabel, whal
   return "Medium Risk";
 }
 
+// Adds a narrow short-term extension overlay without rewriting the structural thesis.
+// A violent upside move can make timing materially worse even while long-term value
+// remains constructive. This only raises the risk floor / early warning; it does not
+// force the core Risk State into Elevated Risk or Late Pump Risk by itself.
+function intelGetPriceExtensionRisk(change24h, currentZone) {
+  const ch24 = Number(change24h);
+  const inValueZone = currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone";
+
+  if (!Number.isFinite(ch24) || ch24 < 5) {
+    return { active: false, severity: "None", warningScore: 0, riskFloor: null };
+  }
+
+  if (ch24 >= 9) {
+    return { active: true, severity: "Extreme", warningScore: 3, riskFloor: "Medium Risk" };
+  }
+
+  if (ch24 >= 6) {
+    return {
+      active: true,
+      severity: "Strong",
+      warningScore: inValueZone ? 2 : 3,
+      riskFloor: "Medium Risk",
+    };
+  }
+
+  if (!inValueZone) {
+    return { active: true, severity: "Moderate", warningScore: 1, riskFloor: "Medium Risk" };
+  }
+
+  return { active: false, severity: "None", warningScore: 0, riskFloor: null };
+}
+
+function intelApplyRiskLevelFloor(baseRiskLevel, riskFloor) {
+  if (!riskFloor) return baseRiskLevel;
+  return getRiskLevelRank(baseRiskLevel) >= getRiskLevelRank(riskFloor)
+    ? baseRiskLevel
+    : riskFloor;
+}
+
 function intelGetAttractivenessBreakdown(price, ma200w, riskLevel, currentZone, stableBiasLabel, whaleLabel) {
   let structureScore = 0, riskScore = 0, momentumScore = 0, rangeScore = 0, participationScore = 0;
   if (currentZone === "Deep Value Zone") structureScore = 3.4;
@@ -4897,7 +4936,7 @@ function intelGetLongTermRegime(price, ma200w, zone) {
   return "Overextended Cycle";
 }
 
-function intelGetEarlyRiskWarning(riskLevel, riskState, stableBiasLabel, whaleLabel, shortTermRegime, currentZone) {
+function intelGetEarlyRiskWarning(riskLevel, riskState, stableBiasLabel, whaleLabel, shortTermRegime, currentZone, priceExtensionRisk = null) {
   let warningScore = 0;
   if (riskLevel === "Medium Risk") warningScore += 1;
   if (riskLevel === "Medium–High Risk") warningScore += 2;
@@ -4910,6 +4949,7 @@ function intelGetEarlyRiskWarning(riskLevel, riskState, stableBiasLabel, whaleLa
   if (currentZone === "Premium Zone") warningScore += 1;
   if (currentZone === "Overheated Zone") warningScore += 2;
   if (currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone") warningScore -= 1;
+  if (priceExtensionRisk?.active) warningScore += Number(priceExtensionRisk.warningScore || 0);
   if (warningScore <= 1) return { label: "Risk Stable", strength: "Low", note: "The environment does not currently show strong early deterioration signals. Risk still exists, but the broader structure is not flashing a clear warning yet." };
   if (warningScore <= 3) return { label: "Risk Rising", strength: "Medium", note: "Some early signs of structural weakening are appearing. This is not a full breakdown signal, but it does suggest that risk is starting to build beneath the surface." };
   return { label: "Risk Active", strength: "High", note: "Multiple inputs now suggest that market risk is no longer only theoretical. The environment is becoming less supportive and downside sensitivity is more relevant." };
@@ -5005,6 +5045,7 @@ function intelGetRiskOutlookMeaning({
   currentZone,
   whaleSignal,
   shortTermRegime,
+  priceExtensionRisk,
 }) {
   const warningLabel = earlyRisk?.label || "Risk Stable";
   const whaleLabel = whaleSignal?.label || "Low Big-Player Activity";
@@ -5029,6 +5070,9 @@ function intelGetRiskOutlookMeaning({
   }
 
   if (riskState === "Constructive but Fragile") {
+    if (priceExtensionRisk?.active && (warningLabel === "Risk Rising" || warningLabel === "Risk Active")) {
+      return "Price location remains constructive, but the upside move is becoming stretched and timing risk has increased. Long-term value can remain intact while chasing the current impulse becomes less forgiving.";
+    }
     if (warningLabel === "Risk Rising" || warningLabel === "Risk Active") {
       return "Price location remains constructive, but weak participation and rising warning signals make the setup fragile. The value case is still present, while timing risk has increased.";
     }
@@ -5172,7 +5216,9 @@ function buildIntelligenceModel(payload) {
     flowPulse.label
   );
   const riskState = applyRiskStateConfirmation(rawRiskState);
-  const rawRiskLevel = intelGetRiskLevelDetailed(riskState, currentZone, stableBias.label, whaleSignal.label);
+  const priceExtensionRisk = intelGetPriceExtensionRisk(change24h, currentZone);
+  const baseRawRiskLevel = intelGetRiskLevelDetailed(riskState, currentZone, stableBias.label, whaleSignal.label);
+  const rawRiskLevel = intelApplyRiskLevelFloor(baseRawRiskLevel, priceExtensionRisk.riskFloor);
   const riskLevel = applyRiskLevelConfirmation(rawRiskLevel, riskState);
   const attractiveness = intelGetAttractivenessLabel(zoneScore);
   const shortTermRegime = intelGetShortTermRegime(change24h, buyPressure, sellPressure, whaleSignal.direction);
@@ -5187,7 +5233,7 @@ function buildIntelligenceModel(payload) {
   );
   const mediumTermRegime = applyMediumTermRegimeConfirmation(rawMediumTermRegime);
   const longTermRegime = intelGetLongTermRegime(price, ma200w, currentZone);
-  const rawEarlyRisk = intelGetEarlyRiskWarning(riskLevel, riskState, stableBias.label, whaleSignal.label, shortTermRegime, currentZone);
+  const rawEarlyRisk = intelGetEarlyRiskWarning(riskLevel, riskState, stableBias.label, whaleSignal.label, shortTermRegime, currentZone, priceExtensionRisk);
   const earlyRisk = applyEarlyRiskConfirmation(rawEarlyRisk, riskLevel);
   const linkToMarket = intelGetLinkToMarket(riskLevel, currentZone, stableBias.label, earlyRisk.label);
   const zoneExplanation = intelGetZoneExplanation(currentZone);
@@ -5200,6 +5246,7 @@ function buildIntelligenceModel(payload) {
     currentZone,
     whaleSignal,
     shortTermRegime,
+    priceExtensionRisk,
   });
   const structuralOutlookMeaning = intelGetStructuralOutlookMeaning({
     shortTermRegime,
