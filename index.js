@@ -3502,6 +3502,24 @@ function getScenarioRecoveryTriggerText(phase, recoveryTriggerPrice, lastClosedP
     return `Back above ${triggerText}`;
 }
 
+function getScenarioRiskTriggerText(phase, riskTriggerPrice, lastClosedPrice) {
+    if (phase === "Peak") return "Failed upside continuation";
+
+    const triggerText = formatMoney(riskTriggerPrice);
+    const holdingBelow =
+        Number.isFinite(lastClosedPrice) &&
+        Number.isFinite(riskTriggerPrice) &&
+        lastClosedPrice <= riskTriggerPrice;
+
+    if (holdingBelow) {
+        return `Holding below ${triggerText} - risk confirmation building`;
+    }
+
+    if (phase === "Macro Bottom") return `Clean loss of ${triggerText}`;
+    if (phase === "Consolidation") return `Break below ${triggerText}`;
+    return `Below ${triggerText}`;
+}
+
 function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, strongValueUpper, h4Klines) {
     const riskLevelPrice = Math.min(ma200w * 0.98, safeZoneUpper * 0.99);
     const recoveryTriggerPrice = ma200w > 0 ? ma200w * 1.08 : price * 1.05;
@@ -3527,6 +3545,11 @@ function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, str
         scenarioEvidence.lastClosedPrice,
         price
     );
+    const riskTrigger = getScenarioRiskTriggerText(
+        phase,
+        scenarioRiskPrice,
+        scenarioEvidence.lastClosedPrice
+    );
 
     if (phase === "Second Sell-Off") {
         return {
@@ -3534,7 +3557,7 @@ function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, str
             baseScenario: "BTC may still move lower or remain unstable before a more durable macro bottom and recovery attempt can develop.",
             altProbability: `${probabilities.alternative}%`,
             altScenario: "Selling pressure may fade earlier than expected, allowing the market to transition into accumulation sooner.",
-            riskTrigger: `Below ${formatMoney(secondSellOffRiskPrice)}`,
+            riskTrigger,
             recoveryTrigger,
         };
     }
@@ -3544,7 +3567,7 @@ function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, str
             baseScenario: "BTC may spend time building a macro bottom through accumulation before a new expansion phase starts.",
             altProbability: `${probabilities.alternative}%`,
             altScenario: "Instead of immediate recovery, BTC may remain range-bound for longer while bottom-building continues.",
-            riskTrigger: `Clean loss of ${formatMoney(riskLevelPrice)}`,
+            riskTrigger,
             recoveryTrigger,
         };
     }
@@ -3554,7 +3577,7 @@ function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, str
             baseScenario: "BTC is more vulnerable to distribution and a broader corrective phase than to easy continuation from here.",
             altProbability: `${probabilities.alternative}%`,
             altScenario: "Momentum may stay stronger for longer before the larger correction begins.",
-            riskTrigger: "Failed upside continuation",
+            riskTrigger,
             recoveryTrigger,
         };
     }
@@ -3566,7 +3589,7 @@ function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, str
             altScenario: currentZone === "Accumulation Zone"
                 ? "If support continues to hold, consolidation may resolve into re-accumulation."
                 : "If buyers strengthen, consolidation may resolve upward rather than into another sell-off leg.",
-            riskTrigger: `Break below ${formatMoney(riskLevelPrice)}`,
+            riskTrigger,
             recoveryTrigger,
         };
     }
@@ -3575,7 +3598,7 @@ function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, str
         baseScenario: "BTC remains vulnerable to further correction before a clearer consolidation phase can stabilize the structure.",
         altProbability: `${probabilities.alternative}%`,
         altScenario: "If downside momentum fades, the market may transition sideways before a stronger bottoming attempt develops.",
-        riskTrigger: `Below ${formatMoney(riskLevelPrice)}`,
+        riskTrigger,
         recoveryTrigger,
     };
 }
