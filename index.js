@@ -1515,6 +1515,10 @@ const BINANCE_KLINES_4H_TTL = 60 * 1000;
 const BINANCE_KLINES_1W_TTL = 5 * 60 * 1000;
 const BINANCE_TRADES_TTL = 30 * 1000;
 
+const SCENARIO_4H_WINDOW = 12;
+const SCENARIO_4H_MIN_CANDLES = 12;
+const SCENARIO_MAX_PROBABILITY_SHIFT = 6;
+
 const COINGECKO_TTL = 3 * 60 * 60 * 1000;
 const FEAR_GREED_TTL = 60 * 60 * 1000;
 
@@ -2550,12 +2554,22 @@ function buildDashboardFinalSignal(metrics) {
     cyclePosition = "Peak Risk";
   }
 
+  const accumulationBehaviorSignal =
+    (perf30d > 0 && change24h <= 0) ||
+    (rangePos90 < 55 && fearGreedValue <= 40);
+
+  const distributionBehaviorSignal =
+    (perf30d < 0 && change24h < 0) ||
+    (rangePos90 > 72 && fearGreedValue >= 68);
+
+  // Conflicting behavior evidence should remain neutral instead of allowing
+  // the first matching branch to flip the label between opposite states.
   const holderBehavior =
-    (perf30d > 0 && change24h <= 0) || (rangePos90 < 55 && fearGreedValue <= 40)
-      ? "Accumulating"
-      : (perf30d < 0 && change24h < 0) || (rangePos90 > 72 && fearGreedValue >= 68)
-        ? "Distributing"
-        : "Neutral";
+    accumulationBehaviorSignal === distributionBehaviorSignal
+      ? "Neutral"
+      : accumulationBehaviorSignal
+        ? "Accumulating"
+        : "Distributing";
 
   const structurallyCheap =
     rangePos30 <= 28 &&
@@ -3353,58 +3367,216 @@ function getPhasePath(phase) {
         next: "Post-Bottom Recovery Attempt",
     };
 }
-function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, strongValueUpper) {
+
+function getClosedScenarioKlines(h4Klines, now = Date.now()) {
+    if (!Array.isArray(h4Klines)) return [];
+
+    return h4Klines
+        .filter((candle) => {
+            const open = number(candle?.[1], null);
+            const close = number(candle?.[4], null);
+            const closeTime = number(candle?.[6], null);
+
+            return (
+                Number.isFinite(open) &&
+                open > 0 &&
+                Number.isFinite(close) &&
+                close > 0 &&
+                Number.isFinite(closeTime) &&
+                closeTime <= now
+            );
+        })
+        .slice(-SCENARIO_4H_WINDOW);
+}
+
+function getScenarioCandleEvidence(candle, riskTriggerPrice, recoveryTriggerPrice) {
+    const open = number(candle?.[1], null);
+    const close = number(candle?.[4], null);
+
+    if (!Number.isFinite(open) || open <= 0 || !Number.isFinite(close) || close <= 0) {
+        return 0;
+    }
+
+    let levelEvidence = 0;
+    if (
+        Number.isFinite(riskTriggerPrice) &&
+        riskTriggerPrice > 0 &&
+        Number.isFinite(recoveryTriggerPrice) &&
+        recoveryTriggerPrice > riskTriggerPrice
+    ) {
+        const normalizedPosition =
+            ((close - riskTriggerPrice) / (recoveryTriggerPrice - riskTriggerPrice)) * 2 - 1;
+        levelEvidence = clamp(normalizedPosition, -1, 1);
+    } else if (Number.isFinite(recoveryTriggerPrice) && recoveryTriggerPrice > 0) {
+        levelEvidence = close >= recoveryTriggerPrice ? 1 : -1;
+    }
+
+    const bodyChangePct = ((close - open) / open) * 100;
+    const directionEvidence = bodyChangePct >= 0.15 ? 1 : bodyChangePct <= -0.15 ? -1 : 0;
+
+    // Trigger location carries most of the weight. Candle direction adds a
+    // smaller confirmation layer without letting one large candle dominate.
+    return clamp(levelEvidence * 0.8 + directionEvidence * 0.2, -1, 1);
+}
+
+function getScenario4hEvidence(h4Klines, riskTriggerPrice, recoveryTriggerPrice, now = Date.now()) {
+    const closedKlines = getClosedScenarioKlines(h4Klines, now);
+    const lastClosedPrice = closedKlines.length
+        ? number(closedKlines[closedKlines.length - 1]?.[4], null)
+        : null;
+
+    if (closedKlines.length < SCENARIO_4H_MIN_CANDLES) {
+        return {
+            probabilityShift: 0,
+            sampleSize: closedKlines.length,
+            lastClosedPrice,
+        };
+    }
+
+    const evidenceAverage = average(
+        closedKlines.map((candle) =>
+            getScenarioCandleEvidence(candle, riskTriggerPrice, recoveryTriggerPrice)
+        )
+    );
+
+    // With 12 votes bounded to [-1, 1] and a maximum shift of 6, replacing
+    // one closed candle can move the displayed probabilities by at most 1pt.
+    return {
+        probabilityShift: clamp(
+            Math.round(evidenceAverage * SCENARIO_MAX_PROBABILITY_SHIFT),
+            -SCENARIO_MAX_PROBABILITY_SHIFT,
+            SCENARIO_MAX_PROBABILITY_SHIFT
+        ),
+        sampleSize: closedKlines.length,
+        lastClosedPrice,
+    };
+}
+
+function getDynamicScenarioProbabilities(phase, probabilityShift) {
+    const priors = {
+        "Second Sell-Off": { base: 55, alternative: 30 },
+        "Macro Bottom": { base: 60, alternative: 25 },
+        Peak: { base: 58, alternative: 27 },
+        Consolidation: { base: 50, alternative: 30 },
+        "First Sell-Off": { base: 48, alternative: 32 },
+    };
+
+    const prior = priors[phase] || priors["First Sell-Off"];
+    const boundedShift = clamp(
+        Math.round(number(probabilityShift, 0)),
+        -SCENARIO_MAX_PROBABILITY_SHIFT,
+        SCENARIO_MAX_PROBABILITY_SHIFT
+    );
+
+    // Recovery evidence supports the main Macro Bottom thesis. In the other
+    // phases it supports the alternative, more constructive path.
+    const baseAdjustment = phase === "Macro Bottom" ? boundedShift : -boundedShift;
+
+    return {
+        base: prior.base + baseAdjustment,
+        alternative: prior.alternative - baseAdjustment,
+    };
+}
+
+function getScenarioRecoveryTriggerText(phase, recoveryTriggerPrice, lastClosedPrice, livePrice) {
+    const observedPrice = Number.isFinite(lastClosedPrice) ? lastClosedPrice : livePrice;
+    const holdingAbove =
+        Number.isFinite(observedPrice) &&
+        Number.isFinite(recoveryTriggerPrice) &&
+        observedPrice >= recoveryTriggerPrice;
+    const triggerText = formatMoney(recoveryTriggerPrice);
+
+    if (holdingAbove) {
+        if (phase === "Macro Bottom") {
+            return `Holding above ${triggerText} - recovery confirmation building`;
+        }
+        if (phase === "Consolidation") {
+            return `Holding above ${triggerText} - breakout confirmation building`;
+        }
+        return `Holding above ${triggerText} - confirmation building`;
+    }
+
+    if (phase === "Macro Bottom") return `Sustained strength above ${triggerText}`;
+    if (phase === "Peak") return `Reclaim and hold above ${triggerText}`;
+    if (phase === "Consolidation") return `Break above ${triggerText}`;
+    return `Back above ${triggerText}`;
+}
+
+function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, strongValueUpper, h4Klines) {
     const riskLevelPrice = Math.min(ma200w * 0.98, safeZoneUpper * 0.99);
     const recoveryTriggerPrice = ma200w > 0 ? ma200w * 1.08 : price * 1.05;
+    const secondSellOffRiskPrice =
+        Number.isFinite(strongValueUpper) && strongValueUpper > 0
+            ? strongValueUpper
+            : riskLevelPrice;
+    const scenarioRiskPrice = phase === "Second Sell-Off"
+        ? secondSellOffRiskPrice
+        : riskLevelPrice;
+    const scenarioEvidence = getScenario4hEvidence(
+        h4Klines,
+        scenarioRiskPrice,
+        recoveryTriggerPrice
+    );
+    const probabilities = getDynamicScenarioProbabilities(
+        phase,
+        scenarioEvidence.probabilityShift
+    );
+    const recoveryTrigger = getScenarioRecoveryTriggerText(
+        phase,
+        recoveryTriggerPrice,
+        scenarioEvidence.lastClosedPrice,
+        price
+    );
+
     if (phase === "Second Sell-Off") {
         return {
-            baseProbability: "55%",
+            baseProbability: `${probabilities.base}%`,
             baseScenario: "BTC may still move lower or remain unstable before a more durable macro bottom and recovery attempt can develop.",
-            altProbability: "30%",
+            altProbability: `${probabilities.alternative}%`,
             altScenario: "Selling pressure may fade earlier than expected, allowing the market to transition into accumulation sooner.",
-            riskTrigger: `Below ${formatMoney(strongValueUpper)}`,
-            recoveryTrigger: `Back above ${formatMoney(recoveryTriggerPrice)}`,
+            riskTrigger: `Below ${formatMoney(secondSellOffRiskPrice)}`,
+            recoveryTrigger,
         };
     }
     if (phase === "Macro Bottom") {
         return {
-            baseProbability: "60%",
+            baseProbability: `${probabilities.base}%`,
             baseScenario: "BTC may spend time building a macro bottom through accumulation before a new expansion phase starts.",
-            altProbability: "25%",
+            altProbability: `${probabilities.alternative}%`,
             altScenario: "Instead of immediate recovery, BTC may remain range-bound for longer while bottom-building continues.",
             riskTrigger: `Clean loss of ${formatMoney(riskLevelPrice)}`,
-            recoveryTrigger: `Sustained strength above ${formatMoney(recoveryTriggerPrice)}`,
+            recoveryTrigger,
         };
     }
     if (phase === "Peak") {
         return {
-            baseProbability: "58%",
+            baseProbability: `${probabilities.base}%`,
             baseScenario: "BTC is more vulnerable to distribution and a broader corrective phase than to easy continuation from here.",
-            altProbability: "27%",
+            altProbability: `${probabilities.alternative}%`,
             altScenario: "Momentum may stay stronger for longer before the larger correction begins.",
             riskTrigger: "Failed upside continuation",
-            recoveryTrigger: `Hold above ${formatMoney(recoveryTriggerPrice)}`,
+            recoveryTrigger,
         };
     }
     if (phase === "Consolidation") {
         return {
-            baseProbability: "50%",
+            baseProbability: `${probabilities.base}%`,
             baseScenario: "BTC is likely building a transition range before choosing either renewed weakness or more constructive recovery.",
-            altProbability: "30%",
+            altProbability: `${probabilities.alternative}%`,
             altScenario: currentZone === "Accumulation Zone"
                 ? "If support continues to hold, consolidation may resolve into re-accumulation."
                 : "If buyers strengthen, consolidation may resolve upward rather than into another sell-off leg.",
             riskTrigger: `Break below ${formatMoney(riskLevelPrice)}`,
-            recoveryTrigger: `Break above ${formatMoney(recoveryTriggerPrice)}`,
+            recoveryTrigger,
         };
     }
     return {
-        baseProbability: "48%",
+        baseProbability: `${probabilities.base}%`,
         baseScenario: "BTC remains vulnerable to further correction before a clearer consolidation phase can stabilize the structure.",
-        altProbability: "32%",
+        altProbability: `${probabilities.alternative}%`,
         altScenario: "If downside momentum fades, the market may transition sideways before a stronger bottoming attempt develops.",
         riskTrigger: `Below ${formatMoney(riskLevelPrice)}`,
-        recoveryTrigger: `Back above ${formatMoney(recoveryTriggerPrice)}`,
+        recoveryTrigger,
     };
 }
 function getInvestorStance(phase, currentZone, recoveryLabel, perf30d) {
@@ -3601,7 +3773,15 @@ function buildMarketCyclePayload(data) {
   const phaseStage = getPhaseStage(cyclePhase.phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d);
   const phaseReasoning = getPhaseReasoning(price, yearlyHigh, ma200w, currentZone, perf30d, perf90d, yearlyLow, drawdown);
   const phasePath = getPhasePath(cyclePhase.phase);
-  const scenario = getScenarioEngine(cyclePhase.phase, currentZone, price, ma200w, safeZoneUpper, strongValueUpper);
+  const scenario = getScenarioEngine(
+    cyclePhase.phase,
+    currentZone,
+    price,
+    ma200w,
+    safeZoneUpper,
+    strongValueUpper,
+    data?.h4Klines
+  );
   const stance = getInvestorStance(cyclePhase.phase, currentZone, recoveryStatus.label, perf30d);
   const intelligenceLink = getIntelligenceLink(cyclePhase.phase, currentZone);
   const signalInterpretation = getSignalInterpretation(cyclePhase.phase, recoveryStatus.label, currentZone);
@@ -4351,15 +4531,17 @@ async function getOrderFlowPayload() {
 }
 
 async function getMarketAdvancedPayload() {
-  const [tickerResult, weeklyResult, dailyResult] = await Promise.allSettled([
+  const [tickerResult, weeklyResult, dailyResult, h4Result] = await Promise.allSettled([
     fetchBinanceTicker24h(),
     fetchBinanceKlinesWeekly(260),
     fetchBinanceKlinesDaily(400),
+    fetchBinanceKlines4h(180),
   ]);
 
 const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
 const weeklyRaw = weeklyResult.status === "fulfilled" ? weeklyResult.value : null;
 const dailyRaw = dailyResult.status === "fulfilled" ? dailyResult.value : null;
+const h4Raw = h4Result.status === "fulfilled" ? h4Result.value : null;
 
 const dataHealth = getDataHealth([
   {
@@ -4374,10 +4556,15 @@ const dataHealth = getDataHealth([
     name: "dailyKlines",
     status: Array.isArray(dailyRaw) && dailyRaw.length >= 365 ? "live" : "missing",
   },
+  {
+    name: "h4Klines",
+    status: Array.isArray(h4Raw) && h4Raw.length >= SCENARIO_4H_WINDOW ? "live" : "missing",
+  },
 ]);
 
   const weekly = Array.isArray(weeklyRaw) ? weeklyRaw : [];
   const daily = Array.isArray(dailyRaw) ? dailyRaw : [];
+  const h4 = Array.isArray(h4Raw) ? h4Raw : [];
 
   const weeklyHighs = weekly.map((candle) => number(candle[2])).filter((value) => Number.isFinite(value) && value > 0);
   const weeklyLows = weekly.map((candle) => number(candle[3])).filter((value) => Number.isFinite(value) && value > 0);
@@ -4486,6 +4673,7 @@ const dataHealth = getDataHealth([
     deepValueBuyUpper,
     extremeValueUpper,
     panicValueUpper,
+    h4Klines: h4,
     perf30d: percentChange(price, prev30d),
     perf90d: percentChange(price, prev90d),
   });
