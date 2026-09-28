@@ -16,6 +16,9 @@ let LAST_GOOD_TICKER = null;
 const ATTRACTIVENESS_CACHE_FILE =
   process.env.ATTRACTIVENESS_CACHE_FILE ||
   path.join(process.env.RENDER_DISK_MOUNT_PATH || "/tmp", "revelix_attractiveness_cache.json");
+const MARKET_CYCLE_STATE_CACHE_FILE =
+  process.env.MARKET_CYCLE_STATE_CACHE_FILE ||
+  path.join(process.env.RENDER_DISK_MOUNT_PATH || "/tmp", "revelix_market_cycle_state.json");
 
 
 function isValidTicker(ticker) {
@@ -122,6 +125,7 @@ const MARKET_CYCLE_STATE = {
   pendingSinceAt: 0,
   lastEvaluationAt: 0,
   lastCommitAt: 0,
+  lastPersistAt: 0,
 };
 
 const PUSH_TEXTS = {
@@ -1598,6 +1602,15 @@ const MARKET_CYCLE_LOW_GAP_MIN_CHANGE_MS = 30 * 60 * 1000;
 const MARKET_CYCLE_MIN_SWITCH_GAP = 0.5;
 const MARKET_CYCLE_LOW_GAP_THRESHOLD = 1.5;
 const MARKET_CYCLE_STRONG_GAP_THRESHOLD = 3.2;
+const MARKET_CYCLE_STATE_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+const MARKET_CYCLE_STATE_PERSIST_INTERVAL_MS = 60 * 60 * 1000;
+const VALID_MARKET_CYCLE_PHASES = new Set([
+  "Peak",
+  "First Sell-Off",
+  "Consolidation",
+  "Second Sell-Off",
+  "Macro Bottom",
+]);
 
 function isSensitiveMarketCycleBoundary(fromPhase, toPhase) {
   return (
@@ -1606,7 +1619,83 @@ function isSensitiveMarketCycleBoundary(fromPhase, toPhase) {
   );
 }
 
-function applyMarketCyclePhaseConfirmation(candidatePhase, scoreGap, now = Date.now()) {
+function readPersistentMarketCycleState(now = Date.now()) {
+  try {
+    if (!MARKET_CYCLE_STATE_CACHE_FILE || !fs.existsSync(MARKET_CYCLE_STATE_CACHE_FILE)) {
+      return null;
+    }
+
+    const parsed = JSON.parse(fs.readFileSync(MARKET_CYCLE_STATE_CACHE_FILE, "utf8"));
+    const stablePhase = parsed?.stablePhase;
+    const savedAt = Number(parsed?.savedAt);
+    const lastCommitAt = Number(parsed?.lastCommitAt);
+    const lastEvaluationAt = Number(parsed?.lastEvaluationAt);
+
+    if (!VALID_MARKET_CYCLE_PHASES.has(stablePhase)) return null;
+    if (!Number.isFinite(savedAt) || savedAt <= 0) return null;
+    if (now - savedAt > MARKET_CYCLE_STATE_CACHE_TTL) return null;
+
+    return {
+      stablePhase,
+      savedAt,
+      lastCommitAt: Number.isFinite(lastCommitAt) && lastCommitAt > 0 ? lastCommitAt : savedAt,
+      lastEvaluationAt:
+        Number.isFinite(lastEvaluationAt) && lastEvaluationAt > 0
+          ? Math.min(lastEvaluationAt, now)
+          : 0,
+    };
+  } catch (error) {
+    console.warn("Failed to read persistent market cycle state:", error.message);
+    return null;
+  }
+}
+
+function writePersistentMarketCycleState(now = Date.now(), force = false) {
+  try {
+    if (!MARKET_CYCLE_STATE_CACHE_FILE) return;
+    if (!VALID_MARKET_CYCLE_PHASES.has(MARKET_CYCLE_STATE.stablePhase)) return;
+
+    if (
+      !force &&
+      MARKET_CYCLE_STATE.lastPersistAt &&
+      now - MARKET_CYCLE_STATE.lastPersistAt < MARKET_CYCLE_STATE_PERSIST_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    fs.mkdirSync(path.dirname(MARKET_CYCLE_STATE_CACHE_FILE), { recursive: true });
+    fs.writeFileSync(
+      MARKET_CYCLE_STATE_CACHE_FILE,
+      JSON.stringify({
+        stablePhase: MARKET_CYCLE_STATE.stablePhase,
+        lastCommitAt: MARKET_CYCLE_STATE.lastCommitAt || now,
+        lastEvaluationAt: MARKET_CYCLE_STATE.lastEvaluationAt || 0,
+        savedAt: now,
+      }),
+      "utf8"
+    );
+    MARKET_CYCLE_STATE.lastPersistAt = now;
+  } catch (error) {
+    console.warn("Failed to persist market cycle state:", error.message);
+  }
+}
+
+function hydrateMarketCycleState(now = Date.now()) {
+  const persisted = readPersistentMarketCycleState(now);
+  if (!persisted) return;
+
+  MARKET_CYCLE_STATE.stablePhase = persisted.stablePhase;
+  // Never carry a half-confirmed transition through a restart. A candidate must
+  // prove itself again against the restored stable macro phase.
+  MARKET_CYCLE_STATE.pendingPhase = null;
+  MARKET_CYCLE_STATE.pendingPhaseCount = 0;
+  MARKET_CYCLE_STATE.pendingSinceAt = 0;
+  MARKET_CYCLE_STATE.lastEvaluationAt = persisted.lastEvaluationAt;
+  MARKET_CYCLE_STATE.lastCommitAt = persisted.lastCommitAt;
+  MARKET_CYCLE_STATE.lastPersistAt = persisted.savedAt;
+}
+
+function applyMarketCyclePhaseConfirmation(candidatePhase, switchGap, now = Date.now()) {
   if (!candidatePhase) {
     return MARKET_CYCLE_STATE.stablePhase || "Consolidation";
   }
@@ -1615,6 +1704,7 @@ function applyMarketCyclePhaseConfirmation(candidatePhase, scoreGap, now = Date.
     MARKET_CYCLE_STATE.stablePhase = candidatePhase;
     MARKET_CYCLE_STATE.lastEvaluationAt = now;
     MARKET_CYCLE_STATE.lastCommitAt = now;
+    writePersistentMarketCycleState(now, true);
     return candidatePhase;
   }
 
@@ -1624,6 +1714,9 @@ function applyMarketCyclePhaseConfirmation(candidatePhase, scoreGap, now = Date.
     MARKET_CYCLE_STATE.pendingPhase = null;
     MARKET_CYCLE_STATE.pendingPhaseCount = 0;
     MARKET_CYCLE_STATE.pendingSinceAt = 0;
+    // Keep the persisted state fresh while a macro phase remains unchanged, so
+    // a normal deploy/restart does not discard a valid long-lived phase.
+    writePersistentMarketCycleState(now);
     return currentStable;
   }
 
@@ -1633,12 +1726,13 @@ function applyMarketCyclePhaseConfirmation(candidatePhase, scoreGap, now = Date.
 
   MARKET_CYCLE_STATE.lastEvaluationAt = now;
 
-  // Treat a near-tie as unresolved macro structure rather than a phase change.
-  // This is the main guard against Consolidation <-> Second Sell-Off flicker.
-  if (!Number.isFinite(scoreGap) || scoreGap < MARKET_CYCLE_MIN_SWITCH_GAP) {
+  // Compare the candidate directly with the currently displayed stable phase.
+  // A near-tie is unresolved structure, not a macro phase change.
+  if (!Number.isFinite(switchGap) || switchGap < MARKET_CYCLE_MIN_SWITCH_GAP) {
     MARKET_CYCLE_STATE.pendingPhase = null;
     MARKET_CYCLE_STATE.pendingPhaseCount = 0;
     MARKET_CYCLE_STATE.pendingSinceAt = 0;
+    writePersistentMarketCycleState(now);
     return currentStable;
   }
 
@@ -1651,43 +1745,53 @@ function applyMarketCyclePhaseConfirmation(candidatePhase, scoreGap, now = Date.
   }
 
   const sensitiveBoundary = isSensitiveMarketCycleBoundary(currentStable, candidatePhase);
-  const lowGap = scoreGap < MARKET_CYCLE_LOW_GAP_THRESHOLD;
-  const strongGap = scoreGap >= MARKET_CYCLE_STRONG_GAP_THRESHOLD;
+  const lowGap = switchGap < MARKET_CYCLE_LOW_GAP_THRESHOLD;
+  const strongGap = switchGap >= MARKET_CYCLE_STRONG_GAP_THRESHOLD;
 
   let requiredSnapshots = MARKET_CYCLE_CONFIRMATION_SNAPSHOTS;
-  let requiredTime = MARKET_CYCLE_MIN_PHASE_CHANGE_MS;
+  let requiredPendingTime = MARKET_CYCLE_MIN_PHASE_CHANGE_MS;
 
   if (sensitiveBoundary) {
     requiredSnapshots = Math.max(requiredSnapshots, MARKET_CYCLE_BOUNDARY_CONFIRMATION_SNAPSHOTS);
-    requiredTime = Math.max(requiredTime, MARKET_CYCLE_BOUNDARY_MIN_CHANGE_MS);
+    requiredPendingTime = Math.max(requiredPendingTime, MARKET_CYCLE_BOUNDARY_MIN_CHANGE_MS);
   }
 
   if (lowGap) {
     requiredSnapshots = Math.max(requiredSnapshots, MARKET_CYCLE_LOW_GAP_CONFIRMATION_SNAPSHOTS);
-    requiredTime = Math.max(requiredTime, MARKET_CYCLE_LOW_GAP_MIN_CHANGE_MS);
+    requiredPendingTime = Math.max(requiredPendingTime, MARKET_CYCLE_LOW_GAP_MIN_CHANGE_MS);
   }
 
   // A large lead may confirm sooner, but a sensitive Consolidation/Sell-Off
-  // transition still needs at least three independent macro evaluations.
+  // transition still needs several independent macro evaluations and time.
   if (strongGap) {
     requiredSnapshots = Math.max(sensitiveBoundary ? 3 : 2, requiredSnapshots - 1);
-    requiredTime = Math.max(10 * 60 * 1000, sensitiveBoundary ? 15 * 60 * 1000 : 10 * 60 * 1000);
+    requiredPendingTime = sensitiveBoundary ? 15 * 60 * 1000 : 10 * 60 * 1000;
   }
 
   const enoughSnapshots = MARKET_CYCLE_STATE.pendingPhaseCount >= requiredSnapshots;
-  const enoughTime = now - (MARKET_CYCLE_STATE.lastCommitAt || 0) >= requiredTime;
+  const enoughPendingTime =
+    MARKET_CYCLE_STATE.pendingSinceAt > 0 &&
+    now - MARKET_CYCLE_STATE.pendingSinceAt >= requiredPendingTime;
+  const enoughCooldown =
+    now - (MARKET_CYCLE_STATE.lastCommitAt || 0) >= MARKET_CYCLE_MIN_PHASE_CHANGE_MS;
 
-  if (enoughSnapshots && enoughTime) {
+  if (enoughSnapshots && enoughPendingTime && enoughCooldown) {
     MARKET_CYCLE_STATE.stablePhase = candidatePhase;
     MARKET_CYCLE_STATE.pendingPhase = null;
     MARKET_CYCLE_STATE.pendingPhaseCount = 0;
     MARKET_CYCLE_STATE.pendingSinceAt = 0;
     MARKET_CYCLE_STATE.lastCommitAt = now;
+    writePersistentMarketCycleState(now, true);
     return candidatePhase;
   }
 
+  writePersistentMarketCycleState(now);
   return currentStable;
 }
+
+// Restore only the last confirmed macro phase. Pending transitions are
+// intentionally discarded so every restart starts from a known stable state.
+hydrateMarketCycleState();
 
 function isDirectOppositeWyckoffFlip(fromPhase, toPhase) {
   return (
@@ -3322,7 +3426,15 @@ function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, curr
     const best = scored[0];
     const second = scored[1];
     const gap = best.score - second.score;
-    const stablePhase = applyMarketCyclePhaseConfirmation(best.phase, gap);
+    const previousStablePhase = MARKET_CYCLE_STATE.stablePhase;
+    const previousStableResult = previousStablePhase
+        ? scored.find((item) => item.phase === previousStablePhase)
+        : null;
+    const switchGap =
+        previousStableResult && previousStablePhase !== best.phase
+            ? best.score - previousStableResult.score
+            : gap;
+    const stablePhase = applyMarketCyclePhaseConfirmation(best.phase, switchGap);
     const stableResult = scored.find((item) => item.phase === stablePhase) || best;
     const phasePending = stablePhase !== best.phase;
     const scoreMap = Object.fromEntries(
@@ -3347,9 +3459,13 @@ function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, curr
             stableScore: Number(stableResult.score.toFixed(2)),
             secondBestPhase: second.phase,
             secondBestScore: Number(second.score.toFixed(2)),
+            topTwoGap: Number(gap.toFixed(2)),
+            switchGap: Number(switchGap.toFixed(2)),
+            previousStablePhase,
             phasePending,
             pendingPhase: MARKET_CYCLE_STATE.pendingPhase,
             pendingPhaseCount: MARKET_CYCLE_STATE.pendingPhaseCount,
+            pendingSinceAt: MARKET_CYCLE_STATE.pendingSinceAt || null,
             scores: scoreMap,
         },
     };
