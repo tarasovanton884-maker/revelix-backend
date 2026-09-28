@@ -112,6 +112,18 @@ const WYCKOFF_STATE = {
   lastCommitAt: 0,
 };
 
+// Macro Market Phase is intentionally slower than Wyckoff. It keeps a stable
+// phase while a competing phase is only marginally ahead, then commits only
+// after the new read has persisted for multiple evaluation windows.
+const MARKET_CYCLE_STATE = {
+  stablePhase: null,
+  pendingPhase: null,
+  pendingPhaseCount: 0,
+  pendingSinceAt: 0,
+  lastEvaluationAt: 0,
+  lastCommitAt: 0,
+};
+
 const PUSH_TEXTS = {
   signal_up: [
     ["New market read available", "Revelix updated the latest investor view."],
@@ -1572,6 +1584,110 @@ const WYCKOFF_EVALUATION_MS = 2 * 60 * 1000;
 const WYCKOFF_MIN_PHASE_CHANGE_MS = 5 * 60 * 1000;
 const WYCKOFF_LOW_GAP_THRESHOLD = 1.0;
 const WYCKOFF_STRONG_GAP_THRESHOLD = 2.2;
+
+// Market Phase confirmation / hysteresis. The cycle layer is macro by design,
+// so it should not flip because two phase scores trade places by a few tenths.
+// A decisive structural change can still confirm faster, but never instantly.
+const MARKET_CYCLE_CONFIRMATION_SNAPSHOTS = 3;
+const MARKET_CYCLE_LOW_GAP_CONFIRMATION_SNAPSHOTS = 5;
+const MARKET_CYCLE_BOUNDARY_CONFIRMATION_SNAPSHOTS = 4;
+const MARKET_CYCLE_EVALUATION_MS = 5 * 60 * 1000;
+const MARKET_CYCLE_MIN_PHASE_CHANGE_MS = 15 * 60 * 1000;
+const MARKET_CYCLE_BOUNDARY_MIN_CHANGE_MS = 20 * 60 * 1000;
+const MARKET_CYCLE_LOW_GAP_MIN_CHANGE_MS = 30 * 60 * 1000;
+const MARKET_CYCLE_MIN_SWITCH_GAP = 0.5;
+const MARKET_CYCLE_LOW_GAP_THRESHOLD = 1.5;
+const MARKET_CYCLE_STRONG_GAP_THRESHOLD = 3.2;
+
+function isSensitiveMarketCycleBoundary(fromPhase, toPhase) {
+  return (
+    (fromPhase === "Consolidation" && toPhase === "Second Sell-Off") ||
+    (fromPhase === "Second Sell-Off" && toPhase === "Consolidation")
+  );
+}
+
+function applyMarketCyclePhaseConfirmation(candidatePhase, scoreGap, now = Date.now()) {
+  if (!candidatePhase) {
+    return MARKET_CYCLE_STATE.stablePhase || "Consolidation";
+  }
+
+  if (!MARKET_CYCLE_STATE.stablePhase) {
+    MARKET_CYCLE_STATE.stablePhase = candidatePhase;
+    MARKET_CYCLE_STATE.lastEvaluationAt = now;
+    MARKET_CYCLE_STATE.lastCommitAt = now;
+    return candidatePhase;
+  }
+
+  const currentStable = MARKET_CYCLE_STATE.stablePhase;
+
+  if (candidatePhase === currentStable) {
+    MARKET_CYCLE_STATE.pendingPhase = null;
+    MARKET_CYCLE_STATE.pendingPhaseCount = 0;
+    MARKET_CYCLE_STATE.pendingSinceAt = 0;
+    return currentStable;
+  }
+
+  if (now - (MARKET_CYCLE_STATE.lastEvaluationAt || 0) < MARKET_CYCLE_EVALUATION_MS) {
+    return currentStable;
+  }
+
+  MARKET_CYCLE_STATE.lastEvaluationAt = now;
+
+  // Treat a near-tie as unresolved macro structure rather than a phase change.
+  // This is the main guard against Consolidation <-> Second Sell-Off flicker.
+  if (!Number.isFinite(scoreGap) || scoreGap < MARKET_CYCLE_MIN_SWITCH_GAP) {
+    MARKET_CYCLE_STATE.pendingPhase = null;
+    MARKET_CYCLE_STATE.pendingPhaseCount = 0;
+    MARKET_CYCLE_STATE.pendingSinceAt = 0;
+    return currentStable;
+  }
+
+  if (MARKET_CYCLE_STATE.pendingPhase === candidatePhase) {
+    MARKET_CYCLE_STATE.pendingPhaseCount += 1;
+  } else {
+    MARKET_CYCLE_STATE.pendingPhase = candidatePhase;
+    MARKET_CYCLE_STATE.pendingPhaseCount = 1;
+    MARKET_CYCLE_STATE.pendingSinceAt = now;
+  }
+
+  const sensitiveBoundary = isSensitiveMarketCycleBoundary(currentStable, candidatePhase);
+  const lowGap = scoreGap < MARKET_CYCLE_LOW_GAP_THRESHOLD;
+  const strongGap = scoreGap >= MARKET_CYCLE_STRONG_GAP_THRESHOLD;
+
+  let requiredSnapshots = MARKET_CYCLE_CONFIRMATION_SNAPSHOTS;
+  let requiredTime = MARKET_CYCLE_MIN_PHASE_CHANGE_MS;
+
+  if (sensitiveBoundary) {
+    requiredSnapshots = Math.max(requiredSnapshots, MARKET_CYCLE_BOUNDARY_CONFIRMATION_SNAPSHOTS);
+    requiredTime = Math.max(requiredTime, MARKET_CYCLE_BOUNDARY_MIN_CHANGE_MS);
+  }
+
+  if (lowGap) {
+    requiredSnapshots = Math.max(requiredSnapshots, MARKET_CYCLE_LOW_GAP_CONFIRMATION_SNAPSHOTS);
+    requiredTime = Math.max(requiredTime, MARKET_CYCLE_LOW_GAP_MIN_CHANGE_MS);
+  }
+
+  // A large lead may confirm sooner, but a sensitive Consolidation/Sell-Off
+  // transition still needs at least three independent macro evaluations.
+  if (strongGap) {
+    requiredSnapshots = Math.max(sensitiveBoundary ? 3 : 2, requiredSnapshots - 1);
+    requiredTime = Math.max(10 * 60 * 1000, sensitiveBoundary ? 15 * 60 * 1000 : 10 * 60 * 1000);
+  }
+
+  const enoughSnapshots = MARKET_CYCLE_STATE.pendingPhaseCount >= requiredSnapshots;
+  const enoughTime = now - (MARKET_CYCLE_STATE.lastCommitAt || 0) >= requiredTime;
+
+  if (enoughSnapshots && enoughTime) {
+    MARKET_CYCLE_STATE.stablePhase = candidatePhase;
+    MARKET_CYCLE_STATE.pendingPhase = null;
+    MARKET_CYCLE_STATE.pendingPhaseCount = 0;
+    MARKET_CYCLE_STATE.pendingSinceAt = 0;
+    MARKET_CYCLE_STATE.lastCommitAt = now;
+    return candidatePhase;
+  }
+
+  return currentStable;
+}
 
 function isDirectOppositeWyckoffFlip(fromPhase, toPhase) {
   return (
@@ -3206,16 +3322,36 @@ function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, curr
     const best = scored[0];
     const second = scored[1];
     const gap = best.score - second.score;
+    const stablePhase = applyMarketCyclePhaseConfirmation(best.phase, gap);
+    const stableResult = scored.find((item) => item.phase === stablePhase) || best;
+    const phasePending = stablePhase !== best.phase;
+    const scoreMap = Object.fromEntries(
+        scored.map((item) => [item.phase, Number(item.score.toFixed(2))])
+    );
     let confidence = "Low";
-    if (gap >= 3.2)
-        confidence = "High";
-    else if (gap >= 1.5)
-        confidence = "Medium";
+    if (!phasePending) {
+        if (gap >= MARKET_CYCLE_STRONG_GAP_THRESHOLD)
+            confidence = "High";
+        else if (gap >= MARKET_CYCLE_LOW_GAP_THRESHOLD)
+            confidence = "Medium";
+    }
     return {
-        phase: best.phase,
+        phase: stablePhase,
         confidence,
-        desc: best.desc,
-        scoreGap: gap,
+        desc: stableResult.desc,
+        scoreGap: Number(gap.toFixed(2)),
+        debug: {
+            candidatePhase: best.phase,
+            candidateScore: Number(best.score.toFixed(2)),
+            stablePhase,
+            stableScore: Number(stableResult.score.toFixed(2)),
+            secondBestPhase: second.phase,
+            secondBestScore: Number(second.score.toFixed(2)),
+            phasePending,
+            pendingPhase: MARKET_CYCLE_STATE.pendingPhase,
+            pendingPhaseCount: MARKET_CYCLE_STATE.pendingPhaseCount,
+            scores: scoreMap,
+        },
     };
 }
 function getRecoveryStatus(price, ma200w, perf30d, perf90d) {
