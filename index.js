@@ -13,6 +13,33 @@ app.use(express.json());
 const CACHE = new Map();
 const INFLIGHT = new Map();
 let LAST_GOOD_TICKER = null;
+
+// Binance public market data is intentionally routed through Binance's dedicated
+// market-data-only host. Binance explicitly recommends this endpoint for public
+// market data, and keeping it separate from the general API reduces exposure to
+// unrelated traffic on the main API edge. It can be overridden from Render if needed.
+const BINANCE_MARKET_BASE_URL =
+  process.env.BINANCE_MARKET_BASE_URL || "https://data-api.binance.vision";
+
+// Global Binance backoff state. A single 429/418 applies to the outbound IP, not
+// to one endpoint, so every Binance request must respect the same cooldown.
+let BINANCE_REQUEST_QUEUE = Promise.resolve();
+
+const BINANCE_RATE_STATE = {
+  cooldownUntil: 0,
+  lastStatus: null,
+  lastRetryAfterSec: null,
+  lastUsedWeight1m: null,
+  lastRateEventAt: 0,
+  lastSuccessfulAt: 0,
+  lastLogAt: 0,
+};
+
+const BINANCE_SOFT_WEIGHT_LIMIT = Math.max(1000, Number(process.env.BINANCE_SOFT_WEIGHT_LIMIT) || 5200);
+const BINANCE_DEFAULT_429_COOLDOWN_MS = 60 * 1000;
+const BINANCE_DEFAULT_418_COOLDOWN_MS = 10 * 60 * 1000;
+const BINANCE_COOLDOWN_LOG_INTERVAL_MS = 60 * 1000;
+
 const ATTRACTIVENESS_CACHE_FILE =
   process.env.ATTRACTIVENESS_CACHE_FILE ||
   path.join(process.env.RENDER_DISK_MOUNT_PATH || "/tmp", "revelix_attractiveness_cache.json");
@@ -366,6 +393,71 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isBinanceMarketUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host.endsWith("binance.com") || host.endsWith("binance.vision");
+  } catch (_error) {
+    return false;
+  }
+}
+
+function parseRetryAfterMs(value) {
+  if (!value) return null;
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.ceil(seconds * 1000);
+  }
+
+  const dateMs = Date.parse(value);
+  if (Number.isFinite(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+
+  return null;
+}
+
+function getBinanceCooldownRemainingMs(now = Date.now()) {
+  return Math.max(0, (BINANCE_RATE_STATE.cooldownUntil || 0) - now);
+}
+
+function activateBinanceCooldown(status, retryAfterMs = null, reason = "rate limit") {
+  const now = Date.now();
+  const fallbackMs =
+    status === 418 ? BINANCE_DEFAULT_418_COOLDOWN_MS : BINANCE_DEFAULT_429_COOLDOWN_MS;
+  const waitMs = Math.max(1000, Number.isFinite(retryAfterMs) ? retryAfterMs : fallbackMs);
+  const nextUntil = now + waitMs;
+  const extended = nextUntil > (BINANCE_RATE_STATE.cooldownUntil || 0);
+
+  if (extended) {
+    BINANCE_RATE_STATE.cooldownUntil = nextUntil;
+  }
+
+  BINANCE_RATE_STATE.lastStatus = status;
+  BINANCE_RATE_STATE.lastRetryAfterSec = Math.ceil(waitMs / 1000);
+  BINANCE_RATE_STATE.lastRateEventAt = now;
+
+  if (extended || now - (BINANCE_RATE_STATE.lastLogAt || 0) >= BINANCE_COOLDOWN_LOG_INTERVAL_MS) {
+    BINANCE_RATE_STATE.lastLogAt = now;
+    console.warn(
+      `[BINANCE] ${reason}; status=${status}; cooldown=${Math.ceil(
+        getBinanceCooldownRemainingMs(now) / 1000
+      )}s; usedWeight1m=${BINANCE_RATE_STATE.lastUsedWeight1m ?? "unknown"}`
+    );
+  }
+}
+
+function createBinanceCooldownError() {
+  const remainingMs = getBinanceCooldownRemainingMs();
+  const error = new Error(`Binance cooldown active (${Math.ceil(remainingMs / 1000)}s remaining)`);
+  error.code = "BINANCE_COOLDOWN";
+  error.status = BINANCE_RATE_STATE.lastStatus || 429;
+  error.retryAfterMs = remainingMs;
+  error.silent = true;
+  return error;
+}
+
 async function fetchJsonWithRetry(url, timeoutMs = 10000, attempts = 3) {
   let lastError = null;
 
@@ -374,11 +466,23 @@ async function fetchJsonWithRetry(url, timeoutMs = 10000, attempts = 3) {
       return await fetchJson(url, timeoutMs);
     } catch (error) {
       lastError = error;
-      console.warn(`Fetch attempt ${i}/${attempts} failed:`, error.message);
 
-      if (i < attempts) {
-        await sleep(500 * i);
+      // Binance explicitly requires clients to stop after 429. Retrying 429/418
+      // immediately can escalate or extend an IP ban, so these errors never retry.
+      const stopImmediately =
+        error?.status === 418 ||
+        error?.status === 429 ||
+        error?.code === "BINANCE_COOLDOWN";
+
+      if (!error?.silent) {
+        console.warn(`Fetch attempt ${i}/${attempts} failed:`, error.message);
       }
+
+      if (stopImmediately || i >= attempts) {
+        break;
+      }
+
+      await sleep(500 * i);
     }
   }
 
@@ -386,6 +490,28 @@ async function fetchJsonWithRetry(url, timeoutMs = 10000, attempts = 3) {
 }
 
 async function fetchJson(url, timeoutMs = 10000) {
+  const isBinance = isBinanceMarketUrl(url);
+
+  if (!isBinance) {
+    return fetchJsonDirect(url, timeoutMs, false);
+  }
+
+  // Serialize Binance calls. warmCoreSnapshots builds several payloads in parallel;
+  // without a queue they can all hit Binance at the same instant. Queuing means a
+  // first 429/418 activates cooldown before the remaining calls ever reach the wire.
+  const queuedRequest = BINANCE_REQUEST_QUEUE
+    .catch(() => null)
+    .then(() => fetchJsonDirect(url, timeoutMs, true));
+
+  BINANCE_REQUEST_QUEUE = queuedRequest.catch(() => null);
+  return queuedRequest;
+}
+
+async function fetchJsonDirect(url, timeoutMs = 10000, isBinance = false) {
+  if (isBinance && getBinanceCooldownRemainingMs() > 0) {
+    throw createBinanceCooldownError();
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -394,6 +520,46 @@ async function fetchJson(url, timeoutMs = 10000) {
       headers: { Accept: "application/json" },
       signal: controller.signal,
     });
+
+    if (isBinance) {
+      const usedWeightHeader = response.headers.get("x-mbx-used-weight-1m");
+      const usedWeight = usedWeightHeader === null ? null : Number(usedWeightHeader);
+      if (Number.isFinite(usedWeight)) {
+        BINANCE_RATE_STATE.lastUsedWeight1m = usedWeight;
+      }
+
+      if (response.ok) {
+        BINANCE_RATE_STATE.lastSuccessfulAt = Date.now();
+      }
+
+      if (response.status === 418 || response.status === 429) {
+        const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+        activateBinanceCooldown(
+          response.status,
+          retryAfterMs,
+          response.status === 418 ? "IP ban received" : "rate limit received"
+        );
+
+        const error = new Error(
+          `Request failed: ${response.status}${
+            Number.isFinite(retryAfterMs) ? `; Retry-After ${Math.ceil(retryAfterMs / 1000)}s` : ""
+          }`
+        );
+        error.status = response.status;
+        error.retryAfterMs = retryAfterMs;
+        throw error;
+      }
+
+      // Render egress IPs are shared. If another service using the same outbound IP
+      // has already consumed most of Binance's minute budget, stop before 429.
+      if (
+        response.ok &&
+        Number.isFinite(BINANCE_RATE_STATE.lastUsedWeight1m) &&
+        BINANCE_RATE_STATE.lastUsedWeight1m >= BINANCE_SOFT_WEIGHT_LIMIT
+      ) {
+        activateBinanceCooldown(429, 60 * 1000, "soft weight guard activated");
+      }
+    }
 
     if (response.status === 429) {
       const error = new Error("Request failed: 429 Too Many Requests");
@@ -420,11 +586,15 @@ async function fetchJsonWithStaleFallback(url, cacheKey, timeoutMs = 10000) {
     const stale = getCache(cacheKey, true);
 
     if (stale !== null) {
-      console.warn(`Fallback to stale cache for ${cacheKey}:`, error.message);
+      if (!error?.silent) {
+        console.warn(`Fallback to stale cache for ${cacheKey}:`, error.message);
+      }
       return stale;
     }
 
-    console.warn(`No stale cache for ${cacheKey}:`, error.message);
+    if (!error?.silent) {
+      console.warn(`No stale cache for ${cacheKey}:`, error.message);
+    }
     return null;
   }
 }
@@ -1526,10 +1696,10 @@ const MARKET_ADVANCED_TTL = 60 * 1000;
 const INTELLIGENCE_TTL = 60 * 1000;
 
 const BINANCE_TICKER_TTL = 30 * 1000;
-const BINANCE_KLINES_1D_TTL = 60 * 1000;
-const BINANCE_KLINES_4H_TTL = 60 * 1000;
-const BINANCE_KLINES_1W_TTL = 5 * 60 * 1000;
-const BINANCE_TRADES_TTL = 30 * 1000;
+const BINANCE_KLINES_1D_TTL = 2 * 60 * 1000;
+const BINANCE_KLINES_4H_TTL = 2 * 60 * 1000;
+const BINANCE_KLINES_1W_TTL = 10 * 60 * 1000;
+const BINANCE_TRADES_TTL = 2 * 60 * 1000;
 
 const SCENARIO_4H_WINDOW = 12;
 const SCENARIO_4H_MIN_CANDLES = 12;
@@ -2423,7 +2593,7 @@ async function fetchBinanceTicker24h() {
     BINANCE_TICKER_TTL,
     async () => {
       const data = await fetchJsonWithStaleFallback(
-        "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT",
+        `${BINANCE_MARKET_BASE_URL}/api/v3/ticker/24hr?symbol=BTCUSDT`,
         "binance_ticker_24h"
       );
 
@@ -2453,7 +2623,7 @@ async function fetchBinanceKlinesDaily(limit = 120) {
     BINANCE_KLINES_1D_TTL,
     async () => {
       const data = await fetchJsonWithStaleFallback(
-        `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=${limit}`,
+        `${BINANCE_MARKET_BASE_URL}/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=${limit}`,
         cacheKey
       );
 
@@ -2482,7 +2652,7 @@ async function fetchBinanceKlines4h(limit = 180) {
     BINANCE_KLINES_4H_TTL,
     async () => {
       const data = await fetchJsonWithStaleFallback(
-        `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=${limit}`,
+        `${BINANCE_MARKET_BASE_URL}/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=${limit}`,
         cacheKey
       );
 
@@ -2511,7 +2681,7 @@ async function fetchBinanceKlinesWeekly(limit = 260) {
     BINANCE_KLINES_1W_TTL,
     async () => {
       const data = await fetchJsonWithStaleFallback(
-        `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1w&limit=${limit}`,
+        `${BINANCE_MARKET_BASE_URL}/api/v3/klines?symbol=BTCUSDT&interval=1w&limit=${limit}`,
         cacheKey
       );
 
@@ -2540,7 +2710,7 @@ async function fetchBinanceTrades(limit = 1000) {
     BINANCE_TRADES_TTL,
     async () => {
       const data = await fetchJsonWithStaleFallback(
-        `https://api.binance.com/api/v3/trades?symbol=BTCUSDT&limit=${limit}`,
+        `${BINANCE_MARKET_BASE_URL}/api/v3/trades?symbol=BTCUSDT&limit=${limit}`,
         cacheKey
       );
 
@@ -6188,46 +6358,59 @@ app.get("/api/intelligence", async (_req, res) => {
 
 app.get("/api/debug/binance", async (_req, res) => {
   const startedAt = Date.now();
+  const cooldownRemainingMs = getBinanceCooldownRemainingMs();
 
-  try {
-    const response = await fetch(
-      "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT",
-      { headers: { Accept: "application/json" } }
-    );
-
-    const text = await response.text();
-    let parsed = null;
-
-    try {
-      parsed = JSON.parse(text);
-    } catch (_error) {
-      parsed = null;
-    }
-
-    res.json({
-      ok: response.ok,
-      status: response.status,
-      statusText: response.statusText,
-      durationMs: Date.now() - startedAt,
-
-      validTicker: isValidTicker(parsed),
-      liveLastPrice: parsed?.lastPrice ?? null,
-
+  if (cooldownRemainingMs > 0) {
+    return res.json({
+      ok: false,
+      skippedLiveProbe: true,
+      reason: "binance_cooldown",
+      baseUrl: BINANCE_MARKET_BASE_URL,
+      cooldownRemainingSec: Math.ceil(cooldownRemainingMs / 1000),
+      cooldownUntil: new Date(BINANCE_RATE_STATE.cooldownUntil).toISOString(),
+      lastStatus: BINANCE_RATE_STATE.lastStatus,
+      lastRetryAfterSec: BINANCE_RATE_STATE.lastRetryAfterSec,
+      lastUsedWeight1m: BINANCE_RATE_STATE.lastUsedWeight1m,
       staleCacheLastPrice: getCache("binance_ticker_24h", true)?.lastPrice ?? null,
       lastGoodLastPrice: LAST_GOOD_TICKER?.lastPrice ?? null,
+      checkedAt: new Date().toISOString(),
+    });
+  }
 
-      preview: text.slice(0, 300),
+  try {
+    const parsed = await fetchJson(
+      `${BINANCE_MARKET_BASE_URL}/api/v3/ticker/24hr?symbol=BTCUSDT`,
+      7000
+    );
+
+    res.json({
+      ok: true,
+      status: 200,
+      durationMs: Date.now() - startedAt,
+      baseUrl: BINANCE_MARKET_BASE_URL,
+      validTicker: isValidTicker(parsed),
+      liveLastPrice: parsed?.lastPrice ?? null,
+      lastUsedWeight1m: BINANCE_RATE_STATE.lastUsedWeight1m,
+      cooldownRemainingSec: Math.ceil(getBinanceCooldownRemainingMs() / 1000),
+      staleCacheLastPrice: getCache("binance_ticker_24h", true)?.lastPrice ?? null,
+      lastGoodLastPrice: LAST_GOOD_TICKER?.lastPrice ?? null,
       checkedAt: new Date().toISOString(),
     });
   } catch (error) {
-    return res.status(500).json({
+    return res.json({
       ok: false,
+      status: error?.status ?? null,
       error: error.message,
       durationMs: Date.now() - startedAt,
-
+      baseUrl: BINANCE_MARKET_BASE_URL,
+      cooldownRemainingSec: Math.ceil(getBinanceCooldownRemainingMs() / 1000),
+      cooldownUntil: BINANCE_RATE_STATE.cooldownUntil
+        ? new Date(BINANCE_RATE_STATE.cooldownUntil).toISOString()
+        : null,
+      lastRetryAfterSec: BINANCE_RATE_STATE.lastRetryAfterSec,
+      lastUsedWeight1m: BINANCE_RATE_STATE.lastUsedWeight1m,
       staleCacheLastPrice: getCache("binance_ticker_24h", true)?.lastPrice ?? null,
       lastGoodLastPrice: LAST_GOOD_TICKER?.lastPrice ?? null,
-
       checkedAt: new Date().toISOString(),
     });
   }
@@ -6269,6 +6452,23 @@ async function getHealthPayload() {
           priceChangePercent: LAST_GOOD_TICKER.priceChangePercent ?? null,
         }
       : null,
+    binanceRateState: {
+      baseUrl: BINANCE_MARKET_BASE_URL,
+      cooldownActive: getBinanceCooldownRemainingMs(now) > 0,
+      cooldownRemainingSec: Math.ceil(getBinanceCooldownRemainingMs(now) / 1000),
+      cooldownUntil: BINANCE_RATE_STATE.cooldownUntil
+        ? new Date(BINANCE_RATE_STATE.cooldownUntil).toISOString()
+        : null,
+      lastStatus: BINANCE_RATE_STATE.lastStatus,
+      lastRetryAfterSec: BINANCE_RATE_STATE.lastRetryAfterSec,
+      lastUsedWeight1m: BINANCE_RATE_STATE.lastUsedWeight1m,
+      lastRateEventAt: BINANCE_RATE_STATE.lastRateEventAt
+        ? new Date(BINANCE_RATE_STATE.lastRateEventAt).toISOString()
+        : null,
+      lastSuccessfulAt: BINANCE_RATE_STATE.lastSuccessfulAt
+        ? new Date(BINANCE_RATE_STATE.lastSuccessfulAt).toISOString()
+        : null,
+    },
     intelligenceState: {
       stableBias: INTELLIGENCE_STATE.stableBias,
       stableBiasConfidence: INTELLIGENCE_STATE.stableBiasConfidence,
