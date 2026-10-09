@@ -4719,6 +4719,51 @@ function getTrapEngine(perf7d, perf30d, rangePos30, shortVolatilityPct) {
   };
 }
 
+function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
+  if (!Array.isArray(h4Klines) || !h4Klines.length || !Number.isFinite(price) || price <= 0) {
+    return Number.isFinite(fallbackLevel) ? fallbackLevel : null;
+  }
+
+  // Use completed 4H candles and candle bodies for the anchor. A wick can
+  // create a liquidity sweep, but it should not immediately redefine support.
+  const candles = h4Klines.slice(-49, -1).map((candle, index) => ({
+    index,
+    open: number(candle[1], null),
+    high: number(candle[2], null),
+    low: number(candle[3], null),
+    close: number(candle[4], null),
+  })).filter((candle) => [candle.open, candle.high, candle.low, candle.close].every((value) => Number.isFinite(value) && value > 0));
+
+  if (candles.length < 5) return Number.isFinite(fallbackLevel) ? fallbackLevel : null;
+
+  const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
+  const clusterTolerancePct = Math.max(safeAtr * 0.35, 0.6);
+  const touchTolerancePct = Math.max(safeAtr * 0.45, 0.9);
+  const candidates = [];
+
+  for (let index = 2; index < candles.length - 2; index += 1) {
+    const candle = candles[index];
+    const bodyLow = Math.min(candle.open, candle.close);
+    const left = Math.min(candles[index - 1].open, candles[index - 1].close);
+    const right = Math.min(candles[index + 1].open, candles[index + 1].close);
+    if (bodyLow >= price || bodyLow > left || bodyLow > right) continue;
+
+    const related = candles.filter((item) => (
+      Math.abs((Math.min(item.open, item.close) - bodyLow) / bodyLow) * 100 <= clusterTolerancePct
+    ));
+    const touches = related.filter((item) => item.low <= bodyLow * (1 + touchTolerancePct / 100)).length;
+    const closesAbove = related.filter((item) => item.close >= bodyLow).length;
+    const recency = index / candles.length;
+    const distancePct = ((price - bodyLow) / price) * 100;
+    const score = touches * 2 + closesAbove + recency - distancePct * 0.12;
+    candidates.push({ level: bodyLow, score });
+  }
+
+  if (!candidates.length) return Number.isFinite(fallbackLevel) ? fallbackLevel : null;
+  candidates.sort((a, b) => b.score - a.score || b.level - a.level);
+  return candidates[0].level;
+}
+
 function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
   if (!Array.isArray(h4Klines) || !h4Klines.length || !Number.isFinite(supportLevel) || supportLevel <= 0) {
     return { label: "Unconfirmed", held: false, broken: false, positive: false };
@@ -4746,16 +4791,21 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
   const previousCloseBelow = previousCandle?.close < supportLevel * (1 - breakTolerancePct / 100);
   const broken = Boolean(lastCloseBelow && previousCloseBelow);
   const held = supportTested && !broken && lastCandle.close >= supportLevel * (1 - breakTolerancePct / 100);
+  const sweptAndReclaimed = held && candles.some((candle) => (
+    candle.low < supportLevel * (1 - Math.max(safeAtr * 0.25, 0.5) / 100) &&
+    candle.close >= supportLevel
+  ));
   const positive = held && (
     lastCandle.close > lastCandle.open ||
     (previousCandle && previousCandle.close > previousCandle.open && lastCandle.close >= supportLevel)
-  );
+  ) || sweptAndReclaimed;
 
   return {
-    label: broken ? "Broken" : positive ? "Held with reaction" : held ? "Held" : "Unconfirmed",
+    label: broken ? "Broken" : sweptAndReclaimed ? "Swept and reclaimed" : positive ? "Held with reaction" : held ? "Held" : "Unconfirmed",
     held,
     broken,
     positive,
+    sweptAndReclaimed,
   };
 }
 
@@ -4770,8 +4820,20 @@ function buildDcaOpportunity({
   perf7d,
   perf30d,
 }) {
-  const nearestSupport = ladder?.below?.[0] || null;
-  const supportReaction = getDcaSupportReaction(h4Klines, nearestSupport?.level, atr14Pct);
+  const nearestLiquidity = ladder?.below?.[0] || null;
+  const structuralSupportLevel = getStructuralDcaSupport(
+    h4Klines,
+    price,
+    atr14Pct,
+    nearestLiquidity?.level
+  );
+  const nearestSupport = structuralSupportLevel ? {
+    ...(nearestLiquidity || {}),
+    level: structuralSupportLevel,
+    distancePct: ((price - structuralSupportLevel) / price) * 100,
+    label: "Confirmed Support",
+  } : null;
+  const supportReaction = getDcaSupportReaction(h4Klines, structuralSupportLevel, atr14Pct);
   const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
   const supportDistance = number(nearestSupport?.distancePct, 999);
   const nearSupport = supportDistance <= Math.max(safeAtr * 1.35, 3.5);
@@ -4797,6 +4859,13 @@ function buildDcaOpportunity({
       level: nearestSupport.level,
       distancePct: nearestSupport.distancePct,
       density: nearestSupport.density,
+      label: nearestSupport.label,
+    } : null,
+    liquidityZone: nearestLiquidity ? {
+      level: nearestLiquidity.level,
+      distancePct: nearestLiquidity.distancePct,
+      density: nearestLiquidity.density,
+      label: nearestLiquidity.label,
     } : null,
     supportReaction: supportReaction.label,
     entryContext,
@@ -4841,9 +4910,9 @@ function buildDcaOpportunity({
     return {
       ...base,
       status: "Small DCA",
-      intro: "The market is close to a lower liquidity zone and the support read is constructive enough for cautious accumulation.",
+      intro: "A structural support zone is being tested and the setup is constructive enough for cautious accumulation.",
       action: "Use only a small tranche and leave room for a deeper sweep or stronger confirmation.",
-      rationale: `The zone is ${supportDistance.toFixed(1)}% below price and the recent support read is ${supportReaction.label.toLowerCase()}.`,
+      rationale: `Confirmed support is ${supportDistance.toFixed(1)}% below price and the recent 4H read is ${supportReaction.label.toLowerCase()}.`,
       watch: "A stronger reaction, improving pressure and confirmation that the zone continues to hold.",
     };
   }
