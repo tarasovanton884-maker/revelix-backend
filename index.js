@@ -10,6 +10,12 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Keep the default below the upcoming 1.4 release. After 1.4 is available,
+// set REVELIX_MIN_APP_VERSION=1.4 in the deployed backend environment.
+const APP_MINIMUM_VERSION = process.env.REVELIX_MIN_APP_VERSION || "1.2";
+const APP_LATEST_VERSION = process.env.REVELIX_LATEST_APP_VERSION || APP_MINIMUM_VERSION;
+const APP_UPDATE_URL = process.env.REVELIX_UPDATE_URL || "https://apps.apple.com/";
+
 const CACHE = new Map();
 const INFLIGHT = new Map();
 let LAST_GOOD_TICKER = null;
@@ -4309,17 +4315,19 @@ const fearGreed = fearGreedResult.status === "fulfilled" ? fearGreedResult.value
 }
 
 async function getMarketDataPayload() {
-  const [tickerResult, klinesResult, globalDataResult, fearGreedResult] = await Promise.allSettled([
+  const [tickerResult, klinesResult, globalDataResult, fearGreedResult, h4Result] = await Promise.allSettled([
     fetchBinanceTicker24h(),
     fetchBinanceKlinesDaily(120),
     fetchCoinGeckoGlobal(),
     fetchFearGreed(),
+    fetchBinanceKlines4h(180),
   ]);
 
   const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
 const klines = klinesResult.status === "fulfilled" ? klinesResult.value : null;
 const globalData = globalDataResult.status === "fulfilled" ? globalDataResult.value : null;
 const fearGreed = fearGreedResult.status === "fulfilled" ? fearGreedResult.value : null;
+const h4Klines = h4Result.status === "fulfilled" && Array.isArray(h4Result.value) ? h4Result.value : [];
 
 const dataHealth = getDataHealth([
   {
@@ -4386,6 +4394,11 @@ const dataHealth = getDataHealth([
   const nearTermHigh = recentHighCandidates.length ? Math.min(...recentHighCandidates) : high7d;
   const nearTermLow = recentLowCandidates.length ? Math.max(...recentLowCandidates) : low7d;
 
+  const h4Highs = h4Klines.map((candle) => number(candle[2], null)).filter((value) => Number.isFinite(value) && value > 0);
+  const h4Lows = h4Klines.map((candle) => number(candle[3], null)).filter((value) => Number.isFinite(value) && value > 0);
+  const dcaNearTermHigh = maxOf(h4Highs.slice(-18)) ?? nearTermHigh;
+  const dcaNearTermLow = minOf(h4Lows.slice(-18)) ?? nearTermLow;
+
   const volRatio = calculateVolumeRatio(klines);
 
   const dashboardMetrics = {
@@ -4414,6 +4427,39 @@ const dataHealth = getDataHealth([
 
   const finalInvestorSignal = buildDashboardFinalSignal(dashboardMetrics);
   const marketClarity = buildDashboardMarketClarity(finalInvestorSignal);
+  const dcaLadder = buildLiquidityLadder(
+    price,
+    high7d,
+    low7d,
+    high14d,
+    low14d,
+    high30d,
+    low30d,
+    high90d,
+    low90d,
+    dcaNearTermHigh,
+    dcaNearTermLow,
+    atr14Pct
+  );
+  const dcaPressure = getPressureResult(
+    dcaLadder.above[0]?.distancePct ?? 999,
+    dcaLadder.below[0]?.distancePct ?? 999,
+    perf7d,
+    perf30d,
+    rangePos30
+  );
+  const dcaTraps = getTrapEngine(perf7d, perf30d, rangePos30, atr14Pct);
+  const dcaOpportunity = buildDcaOpportunity({
+    price,
+    ladder: dcaLadder,
+    pressure: dcaPressure,
+    traps: dcaTraps,
+    h4Klines,
+    atr14Pct,
+    rangePos30,
+    perf7d,
+    perf30d,
+  });
 
   return {
     symbol: "BTCUSDT",
@@ -4428,6 +4474,7 @@ const dataHealth = getDataHealth([
     dataHealth,
     finalInvestorSignal,
     marketClarity,
+    dcaOpportunity,
 
     fearGreed: {
       value: number(fear?.value),
@@ -4669,6 +4716,145 @@ function getTrapEngine(perf7d, perf30d, rangePos30, shortVolatilityPct) {
     shortTrapNote,
     crowdedSideNote,
     note,
+  };
+}
+
+function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
+  if (!Array.isArray(h4Klines) || !h4Klines.length || !Number.isFinite(supportLevel) || supportLevel <= 0) {
+    return { label: "Unconfirmed", held: false, broken: false, positive: false };
+  }
+
+  const candles = h4Klines.slice(-18).map((candle) => ({
+    open: number(candle[1], null),
+    high: number(candle[2], null),
+    low: number(candle[3], null),
+    close: number(candle[4], null),
+  })).filter((candle) => [candle.open, candle.high, candle.low, candle.close].every((value) => Number.isFinite(value) && value > 0));
+
+  if (!candles.length) return { label: "Unconfirmed", held: false, broken: false, positive: false };
+
+  const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
+  const testTolerancePct = Math.max(safeAtr * 0.4, 0.8);
+  const breakTolerancePct = Math.max(safeAtr * 0.55, 1.0);
+  const supportTested = candles.some((candle) => (
+    candle.low <= supportLevel * (1 + testTolerancePct / 100) &&
+    candle.high >= supportLevel * (1 - testTolerancePct / 100)
+  ));
+  const lastCandle = candles[candles.length - 1];
+  const previousCandle = candles[candles.length - 2];
+  const lastCloseBelow = lastCandle.close < supportLevel * (1 - breakTolerancePct / 100);
+  const previousCloseBelow = previousCandle?.close < supportLevel * (1 - breakTolerancePct / 100);
+  const broken = Boolean(lastCloseBelow && previousCloseBelow);
+  const held = supportTested && !broken && lastCandle.close >= supportLevel * (1 - breakTolerancePct / 100);
+  const positive = held && (
+    lastCandle.close > lastCandle.open ||
+    (previousCandle && previousCandle.close > previousCandle.open && lastCandle.close >= supportLevel)
+  );
+
+  return {
+    label: broken ? "Broken" : positive ? "Held with reaction" : held ? "Held" : "Unconfirmed",
+    held,
+    broken,
+    positive,
+  };
+}
+
+function buildDcaOpportunity({
+  price,
+  ladder,
+  pressure,
+  traps,
+  h4Klines,
+  atr14Pct,
+  rangePos30,
+  perf7d,
+  perf30d,
+}) {
+  const nearestSupport = ladder?.below?.[0] || null;
+  const supportReaction = getDcaSupportReaction(h4Klines, nearestSupport?.level, atr14Pct);
+  const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
+  const supportDistance = number(nearestSupport?.distancePct, 999);
+  const nearSupport = supportDistance <= Math.max(safeAtr * 1.35, 3.5);
+  const extendedFromSupport = supportDistance >= Math.max(safeAtr * 2.2, 6.5);
+  const downsidePressure = pressure?.label === "Downside Pull";
+  const upsideCrowding = traps?.longTrap === "High" && Number(rangePos30) > 68;
+  const fastExtension = Number(perf7d) > Math.max(safeAtr * 1.4, 3.5) && Number(rangePos30) > 72;
+  const slowExtension = Number(perf30d) > 8 && Number(rangePos30) > 75;
+  const entryContext = (fastExtension || slowExtension || extendedFromSupport)
+    ? "Price extended from DCA zone"
+    : supportReaction.broken
+      ? "Support broken"
+      : supportReaction.positive
+        ? "Support reaction confirmed"
+        : supportReaction.held
+          ? "Support being tested"
+          : nearSupport
+            ? "Near lower liquidity"
+            : "Waiting for lower liquidity";
+
+  const base = {
+    lowerZone: nearestSupport ? {
+      level: nearestSupport.level,
+      distancePct: nearestSupport.distancePct,
+      density: nearestSupport.density,
+    } : null,
+    supportReaction: supportReaction.label,
+    entryContext,
+  };
+
+  if (fastExtension || slowExtension || upsideCrowding || extendedFromSupport) {
+    return {
+      ...base,
+      status: "Pause DCA",
+      intro: "Price is extended from the nearest lower liquidity zone, so adding here would worsen the tactical entry.",
+      action: "Do not add a new DCA tranche at this level. Wait for a reset toward support; review any existing tactical tranche separately according to your plan.",
+      rationale: `The nearest lower zone is ${Number.isFinite(supportDistance) ? `${supportDistance.toFixed(1)}%` : "not clearly"} away, while price is ${fastExtension || slowExtension ? "extended after a strong move" : "still too far from the tactical zone"}.`,
+      watch: "A pullback into lower liquidity, calmer momentum and a confirmed support reaction.",
+    };
+  }
+
+  if (!nearestSupport || supportReaction.broken || (downsidePressure && !supportReaction.held)) {
+    return {
+      ...base,
+      status: "Wait for DCA zone",
+      intro: "The lower side is still being tested, but there is no confirmed DCA reaction yet.",
+      action: "Keep the next tranche in reserve. If support breaks, wait for the next lower liquidity zone instead of averaging into weakness blindly.",
+      rationale: supportReaction.broken
+        ? "The nearest support has been decisively lost on the recent 4H read."
+        : `Downside pressure is ${pressure?.label === "Downside Pull" ? "still dominant" : "not yet confirmed as supportive"}.`,
+      watch: "A reclaim and hold of the nearest lower zone, followed by improving pressure.",
+    };
+  }
+
+  if (nearSupport && supportReaction.positive && (pressure?.bias === "Demand-Dominant" || traps?.shortTrap === "Medium" || traps?.shortTrap === "High")) {
+    return {
+      ...base,
+      status: "DCA reaction confirmed",
+      intro: "A lower liquidity zone is being defended and the recent 4H reaction is supportive for a measured tranche.",
+      action: "A small, predefined DCA tranche can be considered here. Keep follow-up capital available instead of committing full size at once.",
+      rationale: `Support is ${supportReaction.label.toLowerCase()}, while pressure is ${pressure?.label || "balanced"}. This is a tactical reaction read, not a promise of immediate upside.`,
+      watch: "Whether price keeps holding the zone and develops higher 4H closes without renewed downside pressure.",
+    };
+  }
+
+  if (nearSupport && supportReaction.held) {
+    return {
+      ...base,
+      status: "Small DCA",
+      intro: "The market is close to a lower liquidity zone and the support read is constructive enough for cautious accumulation.",
+      action: "Use only a small tranche and leave room for a deeper sweep or stronger confirmation.",
+      rationale: `The zone is ${supportDistance.toFixed(1)}% below price and the recent support read is ${supportReaction.label.toLowerCase()}.`,
+      watch: "A stronger reaction, improving pressure and confirmation that the zone continues to hold.",
+    };
+  }
+
+  return {
+    ...base,
+    status: "Wait for DCA zone",
+    intro: "The broader market is not purely defensive, but the current price is not giving DCA a strong enough tactical edge.",
+    action: "Stay selective and wait for price to approach lower liquidity with a clearer support reaction before adding size.",
+    rationale: `Pressure is ${pressure?.label || "mixed"}, while the nearest support reaction remains ${supportReaction.label.toLowerCase()}.`,
+    watch: "A cleaner test of lower liquidity and confirmation from the 4H structure.",
   };
 }
 
@@ -6184,6 +6370,18 @@ app.get("/", (_req, res) => {
       "/api/push/register",
       "/api/push/unregister",
     ],
+  });
+});
+
+// Public bootstrap config. The mobile app calls this before authentication so
+// old builds can be stopped before they load market data or user screens.
+app.get("/api/app-config", (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({
+    minimumVersion: APP_MINIMUM_VERSION,
+    latestVersion: APP_LATEST_VERSION,
+    updateUrl: APP_UPDATE_URL,
+    forceUpdate: true,
   });
 });
 
