@@ -4518,12 +4518,13 @@ const fearGreed = fearGreedResult.status === "fulfilled" ? fearGreedResult.value
 }
 
 async function getMarketDataPayload() {
-  const [tickerResult, klinesResult, globalDataResult, fearGreedResult, h4Result] = await Promise.allSettled([
+  const [tickerResult, klinesResult, globalDataResult, fearGreedResult, h4Result, weeklyResult] = await Promise.allSettled([
     fetchBinanceTicker24h(),
     fetchBinanceKlinesDaily(120),
     fetchCoinGeckoGlobal(),
     fetchFearGreed(),
     fetchBinanceKlines4h(180),
+    fetchBinanceKlinesWeekly(260),
   ]);
 
   const ticker = tickerResult.status === "fulfilled" ? tickerResult.value : null;
@@ -4531,6 +4532,7 @@ const klines = klinesResult.status === "fulfilled" ? klinesResult.value : null;
 const globalData = globalDataResult.status === "fulfilled" ? globalDataResult.value : null;
 const fearGreed = fearGreedResult.status === "fulfilled" ? fearGreedResult.value : null;
 const h4Klines = h4Result.status === "fulfilled" && Array.isArray(h4Result.value) ? h4Result.value : [];
+const weeklyKlines = weeklyResult.status === "fulfilled" && Array.isArray(weeklyResult.value) ? weeklyResult.value : [];
 
 const dataHealth = getDataHealth([
   {
@@ -4548,6 +4550,10 @@ const dataHealth = getDataHealth([
   {
     name: "fearGreed",
     status: fearGreed ? "live" : "missing",
+  },
+  {
+    name: "weeklyKlines",
+    status: weeklyKlines.length >= 52 ? "live" : "missing",
   },
 ]);
 
@@ -4658,6 +4664,7 @@ const dataHealth = getDataHealth([
     pressure: dcaPressure,
     traps: dcaTraps,
     h4Klines,
+    weeklyKlines,
     atr14Pct,
     rangePos30,
     perf7d,
@@ -5012,12 +5019,77 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
   };
 }
 
+function getDcaMacroContext(weeklyKlines, price, supportLevel, atr14Pct) {
+  const candles = Array.isArray(weeklyKlines) ? weeklyKlines : [];
+  const closes = candles.map((candle) => number(candle[4], null)).filter((value) => Number.isFinite(value) && value > 0);
+  const highs = candles.map((candle) => number(candle[2], null)).filter((value) => Number.isFinite(value) && value > 0);
+  const lows = candles.map((candle) => number(candle[3], null)).filter((value) => Number.isFinite(value) && value > 0);
+
+  if (closes.length < 52 || !Number.isFinite(price) || !Number.isFinite(supportLevel)) {
+    return {
+      tier: "Tactical",
+      zone: "Macro context unavailable",
+      confluenceLabels: [],
+      context: "Higher-timeframe DCA context is not available yet; this read is based on local support only.",
+    };
+  }
+
+  const ma50w = average(closes.slice(-50));
+  const ma200w = closes.length >= 200 ? average(closes.slice(-200)) : null;
+  const high52 = maxOf(highs.slice(-52));
+  const low52 = minOf(lows.slice(-52));
+  const range52 = Number.isFinite(high52) && Number.isFinite(low52) ? high52 - low52 : null;
+  const sorted52 = [...closes.slice(-52)].sort((a, b) => a - b);
+  const p20 = getPercentile(sorted52, 0.2);
+  const p40 = getPercentile(sorted52, 0.4);
+  const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
+
+  const deepValueUpper = Number.isFinite(ma200w) && Number.isFinite(range52)
+    ? average([p20, ma200w * 0.95, low52 + range52 * 0.22])
+    : p20;
+  const accumulationUpper = Number.isFinite(ma200w) && Number.isFinite(range52)
+    ? average([p40, ma200w * 1.08, low52 + range52 * 0.40])
+    : p40;
+
+  const macroLevels = [
+    Number.isFinite(ma200w) ? { label: "200W moving average", level: ma200w, weight: 2 } : null,
+    Number.isFinite(ma50w) ? { label: "50W moving average", level: ma50w, weight: 1 } : null,
+    Number.isFinite(deepValueUpper) ? { label: "Deep Value zone", level: deepValueUpper, weight: 2 } : null,
+    Number.isFinite(accumulationUpper) ? { label: "Accumulation zone", level: accumulationUpper, weight: 1 } : null,
+    { label: "13W structural low", level: minOf(lows.slice(-13)), weight: 1 },
+    { label: "26W structural low", level: minOf(lows.slice(-26)), weight: 1 },
+  ].filter((item) => item && Number.isFinite(item.level) && item.level > 0 && item.level <= price * 1.02);
+
+  const confluenceTolerance = Math.max(safeAtr * 1.25, 3.5);
+  const confluence = macroLevels.filter((item) => (
+    Math.abs((item.level - supportLevel) / supportLevel) * 100 <= confluenceTolerance
+  ));
+  const weightedConfluence = confluence.reduce((sum, item) => sum + item.weight, 0);
+  const inDeepValue = Number.isFinite(deepValueUpper) && price <= deepValueUpper;
+  const inAccumulation = Number.isFinite(accumulationUpper) && price <= accumulationUpper;
+  const zone = inDeepValue ? "Deep Value" : inAccumulation ? "Accumulation" : "Outside macro value";
+
+  let tier = "Tactical";
+  if (inDeepValue && weightedConfluence >= 4) tier = "Core";
+  else if (inAccumulation && weightedConfluence >= 3) tier = "Strong";
+
+  return {
+    tier,
+    zone,
+    confluenceLabels: confluence.map((item) => item.label),
+    context: confluence.length
+      ? `${zone} overlaps ${confluence.map((item) => item.label).join(" and ")}. This strengthens the zone, but it does not remove downside risk.`
+      : `${zone} is not yet aligned with a major higher-timeframe support cluster. The read remains tactical.`,
+  };
+}
+
 function buildDcaOpportunity({
   price,
   ladder,
   pressure,
   traps,
   h4Klines,
+  weeklyKlines,
   atr14Pct,
   rangePos30,
   perf7d,
@@ -5037,6 +5109,7 @@ function buildDcaOpportunity({
     label: "Confirmed Support",
   } : null;
   const supportReaction = getDcaSupportReaction(h4Klines, structuralSupportLevel, atr14Pct);
+  const macro = getDcaMacroContext(weeklyKlines, price, structuralSupportLevel, atr14Pct);
   const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
   const supportDistance = number(nearestSupport?.distancePct, 999);
   const nearSupport = supportDistance <= Math.max(safeAtr * 1.35, 3.5);
@@ -5072,6 +5145,10 @@ function buildDcaOpportunity({
     } : null,
     supportReaction: supportReaction.label,
     entryContext,
+    dcaTier: macro.tier,
+    macroZone: macro.zone,
+    macroContext: macro.context,
+    macroConfluence: macro.confluenceLabels,
   };
 
   if (fastExtension || slowExtension || upsideCrowding || extendedFromSupport) {
@@ -5099,11 +5176,33 @@ function buildDcaOpportunity({
   }
 
   if (nearSupport && supportReaction.positive && (pressure?.bias === "Demand-Dominant" || traps?.shortTrap === "Medium" || traps?.shortTrap === "High")) {
+    if (macro.tier === "Core") {
+      return {
+        ...base,
+        status: "Core Accumulation Zone",
+        intro: "Price is testing a rare higher-timeframe value area where major support and local reaction overlap. This is stronger than a tactical DCA read, but it is still not a signal to commit the full budget at once.",
+        action: "A larger core tranche may be considered only within a predefined DCA budget. Keep reserve capital for further volatility and confirmation.",
+        rationale: macro.context,
+        watch: "Weekly closes holding the macro zone, continued support reaction and no renewed downside pressure.",
+      };
+    }
+
+    if (macro.tier === "Strong") {
+      return {
+        ...base,
+        status: "Strong DCA Zone",
+        intro: "Local support is reinforced by a major higher-timeframe value zone. This improves the tactical asymmetry, but the opportunity should still be approached in stages.",
+        action: "A measured tranche can be larger than a Small DCA allocation, but keep reserve capital and split the planned budget across further confirmations.",
+        rationale: macro.context,
+        watch: "The macro zone continuing to hold through weekly closes and the local reaction remaining constructive.",
+      };
+    }
+
     return {
       ...base,
-      status: "DCA reaction confirmed",
-      intro: "A lower liquidity zone is being defended and the recent 4H reaction is supportive for a measured tranche.",
-      action: "A small, predefined DCA tranche can be considered here. Keep follow-up capital available instead of committing full size at once.",
+      status: "Confirmed Small DCA",
+      intro: "A lower liquidity zone is being defended and the recent 4H reaction is supportive. Confirmation improved, but this remains a small tactical tranche.",
+      action: "A small, predefined DCA tranche can be considered here. Keep follow-up capital available instead of treating the confirmation as permission to size up aggressively.",
       rationale: `Support is ${supportReaction.label.toLowerCase()}, while pressure is ${pressure?.label || "balanced"}. This is a tactical reaction read, not a promise of immediate upside.`,
       watch: "Whether price keeps holding the zone and develops higher 4H closes without renewed downside pressure.",
     };
