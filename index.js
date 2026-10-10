@@ -5083,6 +5083,31 @@ function getDcaMacroContext(weeklyKlines, price, supportLevel, atr14Pct) {
   };
 }
 
+function getDcaPresentation(status, supportReaction, entryContext) {
+  const statusColor = status === "Core Accumulation Zone" || status === "Strong DCA Zone"
+    ? "#00d09c"
+    : status === "Wait for DCA zone" || status === "Pause DCA"
+      ? "#ff5c5c"
+      : "#f5b942";
+  const supportColor = supportReaction === "Held with reaction" || supportReaction === "Swept and reclaimed"
+    ? "#00d09c"
+    : supportReaction === "Broken"
+      ? "#ff5c5c"
+      : "#f5b942";
+  const entryContextColor = entryContext === "Support reaction confirmed"
+    ? "#00d09c"
+    : entryContext === "Support broken" || entryContext === "Price extended from DCA zone"
+      ? "#ff5c5c"
+      : "#f5b942";
+
+  return {
+    statusColor,
+    supportColor,
+    distanceColor: statusColor,
+    entryContextColor,
+  };
+}
+
 function buildDcaOpportunity({
   price,
   ladder,
@@ -5150,20 +5175,24 @@ function buildDcaOpportunity({
     macroContext: macro.context,
     macroConfluence: macro.confluenceLabels,
   };
+  const decorateDca = (result) => ({
+    ...result,
+    presentation: getDcaPresentation(result.status, supportReaction.label, entryContext),
+  });
 
   if (fastExtension || slowExtension || upsideCrowding || extendedFromSupport) {
-    return {
+    return decorateDca({
       ...base,
       status: "Pause DCA",
       intro: "Price is extended from the nearest lower liquidity zone, so adding here would worsen the tactical entry.",
       action: "Do not add a new DCA tranche at this level. Wait for a reset toward support; review any existing tactical tranche separately according to your plan.",
       rationale: `The nearest lower zone is ${Number.isFinite(supportDistance) ? `${supportDistance.toFixed(1)}%` : "not clearly"} away, while price is ${fastExtension || slowExtension ? "extended after a strong move" : "still too far from the tactical zone"}.`,
       watch: "A pullback into lower liquidity, calmer momentum and a confirmed support reaction.",
-    };
+    });
   }
 
   if (!nearestSupport || supportReaction.broken || (downsidePressure && !supportReaction.held)) {
-    return {
+    return decorateDca({
       ...base,
       status: "Wait for DCA zone",
       intro: "The lower side is still being tested, but there is no confirmed DCA reaction yet.",
@@ -5172,61 +5201,61 @@ function buildDcaOpportunity({
         ? "The nearest support has been decisively lost on the recent 4H read."
         : `Downside pressure is ${pressure?.label === "Downside Pull" ? "still dominant" : "not yet confirmed as supportive"}.`,
       watch: "A reclaim and hold of the nearest lower zone, followed by improving pressure.",
-    };
+    });
   }
 
   if (nearSupport && supportReaction.positive && (pressure?.bias === "Demand-Dominant" || traps?.shortTrap === "Medium" || traps?.shortTrap === "High")) {
     if (macro.tier === "Core") {
-      return {
+      return decorateDca({
         ...base,
         status: "Core Accumulation Zone",
         intro: "Price is testing a rare higher-timeframe value area where major support and local reaction overlap. This is stronger than a tactical DCA read, but it is still not a signal to commit the full budget at once.",
         action: "A larger core tranche may be considered only within a predefined DCA budget. Keep reserve capital for further volatility and confirmation.",
         rationale: macro.context,
         watch: "Weekly closes holding the macro zone, continued support reaction and no renewed downside pressure.",
-      };
+      });
     }
 
     if (macro.tier === "Strong") {
-      return {
+      return decorateDca({
         ...base,
         status: "Strong DCA Zone",
         intro: "Local support is reinforced by a major higher-timeframe value zone. This improves the tactical asymmetry, but the opportunity should still be approached in stages.",
         action: "A measured tranche can be larger than a Small DCA allocation, but keep reserve capital and split the planned budget across further confirmations.",
         rationale: macro.context,
         watch: "The macro zone continuing to hold through weekly closes and the local reaction remaining constructive.",
-      };
+      });
     }
 
-    return {
+    return decorateDca({
       ...base,
       status: "Confirmed Small DCA",
       intro: "A lower liquidity zone is being defended and the recent 4H reaction is supportive. Confirmation improved, but this remains a small tactical tranche.",
       action: "A small, predefined DCA tranche can be considered here. Keep follow-up capital available instead of treating the confirmation as permission to size up aggressively.",
       rationale: `Support is ${supportReaction.label.toLowerCase()}, while pressure is ${pressure?.label || "balanced"}. This is a tactical reaction read, not a promise of immediate upside.`,
       watch: "Whether price keeps holding the zone and develops higher 4H closes without renewed downside pressure.",
-    };
+    });
   }
 
   if (nearSupport && supportReaction.held) {
-    return {
+    return decorateDca({
       ...base,
       status: "Small DCA",
       intro: "A structural support zone is being tested and the setup is constructive enough for cautious accumulation.",
       action: "Use only a small tranche and leave room for a deeper sweep or stronger confirmation.",
       rationale: `Confirmed support is ${supportDistance.toFixed(1)}% below price and the recent 4H read is ${supportReaction.label.toLowerCase()}.`,
       watch: "A stronger reaction, improving pressure and confirmation that the zone continues to hold.",
-    };
+    });
   }
 
-  return {
+  return decorateDca({
     ...base,
     status: "Wait for DCA zone",
     intro: "The broader market is not purely defensive, but the current price is not giving DCA a strong enough tactical edge.",
     action: "Stay selective and wait for price to approach lower liquidity with a clearer support reaction before adding size.",
     rationale: `Pressure is ${pressure?.label || "mixed"}, while the nearest support reaction remains ${supportReaction.label.toLowerCase()}.`,
     watch: "A cleaner test of lower liquidity and confirmation from the 4H structure.",
-  };
+  });
 }
 
 function getWyckoffEngine(perf7d, perf30d, perf90d, rangePos30, rangePos90, atr14Pct, atr30Pct) {
