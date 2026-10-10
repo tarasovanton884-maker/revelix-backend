@@ -1779,6 +1779,7 @@ const MARKET_CYCLE_MIN_SWITCH_GAP = 0.5;
 const MARKET_CYCLE_LOW_GAP_THRESHOLD = 1.5;
 const MARKET_CYCLE_STRONG_GAP_THRESHOLD = 3.2;
 const MARKET_CYCLE_STATE_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+const MARKET_CYCLE_STATE_SCHEMA_VERSION = 2;
 const MARKET_CYCLE_STATE_PERSIST_INTERVAL_MS = 60 * 60 * 1000;
 const VALID_MARKET_CYCLE_PHASES = new Set([
   "Peak",
@@ -1802,6 +1803,7 @@ function readPersistentMarketCycleState(now = Date.now()) {
     }
 
     const parsed = JSON.parse(fs.readFileSync(MARKET_CYCLE_STATE_CACHE_FILE, "utf8"));
+    if (Number(parsed?.version) !== MARKET_CYCLE_STATE_SCHEMA_VERSION) return null;
     const stablePhase = parsed?.stablePhase;
     const savedAt = Number(parsed?.savedAt);
     const lastCommitAt = Number(parsed?.lastCommitAt);
@@ -1843,6 +1845,7 @@ function writePersistentMarketCycleState(now = Date.now(), force = false) {
     fs.writeFileSync(
       MARKET_CYCLE_STATE_CACHE_FILE,
       JSON.stringify({
+        version: MARKET_CYCLE_STATE_SCHEMA_VERSION,
         stablePhase: MARKET_CYCLE_STATE.stablePhase,
         lastCommitAt: MARKET_CYCLE_STATE.lastCommitAt || now,
         lastEvaluationAt: MARKET_CYCLE_STATE.lastEvaluationAt || 0,
@@ -3610,7 +3613,14 @@ function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, curr
         previousStableResult && previousStablePhase !== best.phase
             ? best.score - previousStableResult.score
             : gap;
-    const stablePhase = applyMarketCyclePhaseConfirmation(best.phase, switchGap);
+    // On a cold start, do not let a low-confidence snapshot rewrite the
+    // displayed macro phase immediately. The cycle state may be empty after
+    // a Render restart, while the underlying market has not actually moved.
+    const initialCandidatePhase =
+        !previousStablePhase && gap < MARKET_CYCLE_STRONG_GAP_THRESHOLD
+            ? "Consolidation"
+            : best.phase;
+    const stablePhase = applyMarketCyclePhaseConfirmation(initialCandidatePhase, switchGap);
     const stableResult = scored.find((item) => item.phase === stablePhase) || best;
     const phasePending = stablePhase !== best.phase;
     const scoreMap = Object.fromEntries(
