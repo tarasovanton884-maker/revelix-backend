@@ -3726,6 +3726,137 @@ function getPhaseStage(phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf
     }
     return "Neutral";
 }
+function getPhaseOutlook(phase, recovery, stage, confidence = "Low") {
+    const earlyRecovery = recovery === "Early Recovery";
+    const improving = earlyRecovery || recovery === "Improving" || recovery === "Strong Recovery";
+    const strongRecovery = recovery === "Strong Recovery";
+    const confirmedEnough = confidence === "Medium" || confidence === "High";
+
+    if (phase === "Peak") {
+        if (stage === "Distribution") {
+            return {
+                label: "Distribution risk building",
+                color: "#ff5c5c",
+                note: "The cycle is mature and supply is beginning to dominate demand. This is a risk-management state, not a guaranteed reversal signal.",
+            };
+        }
+        return {
+            label: "Late-cycle expansion",
+            color: "#f5b942",
+            note: "The market remains extended near the cycle peak. New entries require selectivity because upside is becoming less asymmetric.",
+        };
+    }
+
+    if (phase === "First Sell-Off") {
+        if (stage === "Continuation") {
+            return {
+                label: "Correction continuing",
+                color: "#ff5c5c",
+                note: "The first sell-off is still carrying downside momentum, so a stable base has not formed yet.",
+            };
+        }
+        if (improving) {
+            return {
+                label: "Recovery attempt inside correction",
+                color: "#f5b942",
+                note: "Short-term structure is improving inside the first sell-off, but the broader cycle still needs stabilization before a base can form.",
+            };
+        }
+        return {
+            label: "Correction developing",
+            color: "#f5b942",
+            note: "The market is correcting from the peak. The next important step is stabilization rather than immediate continuation higher.",
+        };
+    }
+
+    if (phase === "Consolidation") {
+        if (stage === "Range Formation") {
+            return {
+                label: "Base formation",
+                color: "#f5b942",
+                note: "The market is building a transition range. Direction is not confirmed, so the range should be treated as a process rather than a signal.",
+            };
+        }
+        if (improving || stage === "Pre-Break Move") {
+            return {
+                label: "Recovery base developing",
+                color: "#f5b942",
+                note: confirmedEnough && strongRecovery
+                    ? "Buyers are rebuilding structure inside the range and a recovery attempt is gaining confirmation, but this is not a confirmed breakout or aggressive accumulation signal."
+                    : "Buyers are rebuilding structure inside the range, but the market is still in transition. This is a developing recovery base, not a confirmed breakout or aggressive accumulation signal.",
+            };
+        }
+        return {
+            label: "Holding in consolidation",
+            color: "#f5b942",
+            note: "The market remains range-bound without a confirmed directional transition.",
+        };
+    }
+
+    if (phase === "Second Sell-Off") {
+        if (stage === "Late Capitulation") {
+            return {
+                label: "Capitulation risk",
+                color: "#ff5c5c",
+                note: "Downside pressure is reaching a late corrective stage. A durable bottom still requires a confirmed reaction and reclaim.",
+            };
+        }
+        if (stage === "Selling Pressure Easing") {
+            return {
+                label: "Bottoming attempt with easing pressure",
+                color: "#f5b942",
+                note: "Selling pressure is fading and the market is testing a possible bottoming process, but the macro bottom is not confirmed yet.",
+            };
+        }
+        if (improving) {
+            return {
+                label: "Bottoming attempt developing",
+                color: "#f5b942",
+                note: "The second sell-off is showing early signs of stabilization. This is a bottoming attempt, not a confirmed bottom or automatic buy signal.",
+            };
+        }
+        return {
+            label: "Downside still developing",
+            color: "#ff5c5c",
+            note: "The second sell-off remains vulnerable to further weakness before a durable bottom can form.",
+        };
+    }
+
+    if (phase === "Macro Bottom") {
+        if (stage === "Established Bottom" && strongRecovery) {
+            return {
+                label: "Reaccumulation after established bottom",
+                color: "#f5b942",
+                note: "The bottoming structure is established and recovery is broadening. Reaccumulation is developing before a possible expansion, but continuation is not guaranteed.",
+            };
+        }
+        if (stage === "Established Bottom" && improving) {
+            return {
+                label: "Reaccumulation developing",
+                color: "#f5b942",
+                note: "The bottoming structure is established and buyers are rebuilding positions, but the next expansion still needs confirmation.",
+            };
+        }
+        if (stage === "Early Bottoming") {
+            return {
+                label: "Macro bottom forming",
+                color: "#f5b942",
+                note: "The market is working through a potential macro bottom. Early recovery may appear, but the base is not fully established yet.",
+            };
+        }
+        return {
+            label: "Accumulation base developing",
+            color: "#f5b942",
+            note: "The market is building a base after the sell-off. Recovery and reaccumulation are not confirmed yet.",
+        };
+    }
+
+    return {
+        label: "Transition unclear",
+        color: "#f5b942",
+        note: "The current phase is not yet supported by a clear directional transition.",
+    };
+}
 function getPhaseReasoning(price, yearlyHigh, ma200w, currentZone, perf30d, perf90d, yearlyLow, drawdown) {
     const fromHighPct = yearlyHigh > 0 ? ((yearlyHigh - price) / yearlyHigh) * 100 : 0;
     const maRatio = ma200w > 0 ? ((price - ma200w) / ma200w) * 100 : 0;
@@ -4281,6 +4412,12 @@ function buildMarketCyclePayload(data) {
   );
   const recoveryStatus = getRecoveryStatus(price, ma200w, perf30d, perf90d);
   const phaseStage = getPhaseStage(cyclePhase.phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d);
+  const phaseOutlook = getPhaseOutlook(
+    cyclePhase.phase,
+    recoveryStatus.label,
+    phaseStage,
+    cyclePhase.confidence
+  );
   const phaseReasoning = getPhaseReasoning(price, yearlyHigh, ma200w, currentZone, perf30d, perf90d, yearlyLow, drawdown);
   const phasePath = getPhasePath(cyclePhase.phase);
   const scenario = getScenarioEngine(
@@ -4308,6 +4445,7 @@ function buildMarketCyclePayload(data) {
     cyclePhase,
     recoveryStatus,
     phaseStage,
+    phaseOutlook,
     phaseReasoning,
     phasePath,
     scenario,
