@@ -4030,7 +4030,12 @@ function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, str
         recoveryTrigger,
     };
 }
-function getInvestorStance(phase, currentZone, recoveryLabel, perf30d) {
+function getInvestorStance(phase, currentZone, recoveryLabel, perf30d, phaseStage = "—") {
+    const inValueZone = currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone";
+    const deepValue = currentZone === "Deep Value Zone";
+    const improving = recoveryLabel === "Improving" || recoveryLabel === "Strong Recovery";
+    const weakMomentum = Number.isFinite(Number(perf30d)) && Number(perf30d) < -12;
+
     if (phase === "Macro Bottom") {
         const strongRecovery = recoveryLabel === "Strong Recovery";
 
@@ -4049,13 +4054,35 @@ function getInvestorStance(phase, currentZone, recoveryLabel, perf30d) {
     }
 
     if (phase === "Second Sell-Off") {
+        if (inValueZone && improving && !weakMomentum) {
+            return {
+                headline: deepValue ? "Value Accumulation" : "Selective Accumulation",
+                aggression: deepValue ? "Moderate" : "Low–Moderate",
+                deployment: "Staged",
+                strategy: "Build in tranches",
+                riskApproach: "Defined",
+                note: "The deeper sell-off has improved long-term asymmetry, but entries should still be split into tranches and confirmed by support rather than treated as a confirmed bottom.",
+            };
+        }
+
+        if (weakMomentum || recoveryLabel === "No Recovery" || !inValueZone) {
+            return {
+                headline: "Wait for Stabilization",
+                aggression: "Very Low",
+                deployment: "Reserve capital",
+                strategy: "Wait for support reclaim",
+                riskApproach: "Strict discipline",
+                note: "The second sell-off is not automatically an entry signal. Preserve capital until price shows a durable reaction and the downside momentum begins to fade.",
+            };
+        }
+
         return {
             headline: "Selective Positioning",
             aggression: perf30d < -5 ? "Very Low" : "Low",
             deployment: "Highly selective",
             strategy: "Add only after stabilization",
             riskApproach: "Strict discipline",
-            note: "This phase can trap early buyers, so any new exposure should remain small and depend on visible stabilization rather than price alone.",
+            note: "The second sell-off can offer better asymmetry than a neutral range, but new exposure should remain small and depend on visible stabilization rather than price alone.",
         };
     }
 
@@ -4071,13 +4098,35 @@ function getInvestorStance(phase, currentZone, recoveryLabel, perf30d) {
     }
 
     if (phase === "Consolidation") {
+        if (inValueZone && improving) {
+            return {
+                headline: "Selective Accumulation",
+                aggression: "Low–Moderate",
+                deployment: "Staged",
+                strategy: phaseStage === "Pre-Break Move" ? "Build before confirmation" : "Build carefully",
+                riskApproach: "Flexible",
+                note: "The range is improving and value is becoming more constructive, but consolidation can still produce false breaks. Keep entries staged and leave room for a deeper test.",
+            };
+        }
+
+        if (currentZone === "Fair Value Zone" && improving) {
+            return {
+                headline: "Patient Positioning",
+                aggression: "Low",
+                deployment: "Patient",
+                strategy: "Wait for better asymmetry",
+                riskApproach: "Flexible",
+                note: "Recovery is improving, but price is still closer to fair value than deep value. Patience keeps the risk/reward cleaner while the range resolves.",
+            };
+        }
+
         return {
-            headline: recoveryLabel === "Improving" ? "Early Positioning" : "Wait & Observe",
-            aggression: recoveryLabel === "Improving" ? "Low–Moderate" : "Low",
-            deployment: currentZone === "Accumulation Zone" ? "Selective" : "Patient",
-            strategy: recoveryLabel === "Improving" ? "Build carefully" : "Wait for directional confirmation",
+            headline: "Wait & Observe",
+            aggression: "Low",
+            deployment: "Patient",
+            strategy: "Wait for directional confirmation",
             riskApproach: "Flexible",
-            note: "Markets often fake direction during consolidation, so patient positioning usually beats emotional conviction.",
+            note: "Markets often fake direction during consolidation, so patient positioning usually beats emotional conviction until value or structure improves.",
         };
     }
 
@@ -4233,7 +4282,13 @@ function buildMarketCyclePayload(data) {
     strongValueUpper,
     data?.h4Klines
   );
-  const stance = getInvestorStance(cyclePhase.phase, currentZone, recoveryStatus.label, perf30d);
+  const stance = getInvestorStance(
+    cyclePhase.phase,
+    currentZone,
+    recoveryStatus.label,
+    perf30d,
+    phaseStage
+  );
   const intelligenceLink = getIntelligenceLink(cyclePhase.phase, currentZone);
   const signalInterpretation = getSignalInterpretation(cyclePhase.phase, recoveryStatus.label, currentZone);
 
