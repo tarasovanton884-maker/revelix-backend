@@ -5338,11 +5338,111 @@ function getFlowReasoning(upsideDistance, downsideDistance, pressureLabel, trapL
 }
 
 function getFlowInterpretation(pressureLabel, wyckoffPhase, longTrap, shortTrap) {
-  if (pressureLabel === "Upside Pull" && wyckoffPhase === "Accumulation") return { title: "How to read this signal", flowTone: "Constructive Flow", investorRead: "Recovery-aligned", confirmationNeed: "Market-supportive", body: "The market is showing a constructive combination of lower-range absorption with liquidity attraction above. This does not guarantee immediate upside, but it does suggest the flow layer is becoming more supportive rather than purely defensive." };
-  if (pressureLabel === "Downside Pull" && wyckoffPhase === "Markdown") return { title: "How to read this signal", flowTone: "Fragile Flow", investorRead: "Sell-off aligned", confirmationNeed: "Risk-sensitive", body: "The market still looks vulnerable. Downside liquidity remains more actionable and the flow structure behaves more like markdown than stabilisation." };
-  if (longTrap === "High") return { title: "How to read this signal", flowTone: "Fragile Flow", investorRead: "Crowded upside", confirmationNeed: "Wait for cleaner reset", body: "The market is stretched enough for long-side crowding risk to matter. Even if the bigger trend remains positive, weak short-term follow-through can still punish late buyers." };
-  if (shortTrap === "High") return { title: "How to read this signal", flowTone: "Constructive Flow", investorRead: "Short squeeze risk", confirmationNeed: "Needs macro support", body: "The market is depressed enough for short-side crowding risk to matter. This does not confirm a bigger reversal, but it does raise the probability of a squeeze or local rebound first." };
-  return { title: "How to read this signal", flowTone: "Mixed Flow", investorRead: "Stay selective", confirmationNeed: "Needs broader confirmation", body: "Order Flow here should be read as a confirmation layer, not as a standalone decision. It helps investors judge whether the current market behaviour supports, weakens, or delays the bigger thesis from Market and Intelligence." };
+  const title = "How to read this signal";
+  const phase = wyckoffPhase || "Neutral";
+  const pressure = pressureLabel || "Mixed";
+
+  // Two opposing trap readings are a genuine conflict, not a constructive or
+  // fragile signal. Keep this ahead of the single-sided trap branches below.
+  if (longTrap === "High" && shortTrap === "High") {
+    return {
+      title,
+      flowTone: "Mixed Flow",
+      investorRead: "Two-sided crowding",
+      confirmationNeed: "Wait for positioning to clear",
+      body: "Both long- and short-side crowding are elevated, so the next move can be amplified in either direction. Treat Order Flow as a warning about volatility and wait for one side to lose pressure before sizing a position.",
+    };
+  }
+
+  if (pressure === "Upside Pull" && (phase === "Accumulation" || phase === "Markup")) {
+    return {
+      title,
+      flowTone: "Constructive Flow",
+      investorRead: phase === "Accumulation" ? "Demand building" : "Upside follow-through",
+      confirmationNeed: "Market-supportive",
+      body: phase === "Accumulation"
+        ? "Upside liquidity is attracting price while the broader structure still resembles accumulation. This is a supportive confirmation layer, not proof of an immediate breakout; Market should confirm that the recovery is becoming more durable."
+        : "Upside liquidity is attracting price and the broader structure is already behaving more like markup. Follow-through is constructive, but a failed reclaim or renewed long crowding would weaken the read.",
+    };
+  }
+
+  if (pressure === "Downside Pull" && phase === "Markdown") {
+    return {
+      title,
+      flowTone: "Fragile Flow",
+      investorRead: "Sell-off aligned",
+      confirmationNeed: "Risk-sensitive",
+      body: "Downside liquidity remains more actionable and the broader structure is behaving like markdown. The flow picture is vulnerable, so a support reaction and a change in pressure should appear before treating weakness as a confirmed base.",
+    };
+  }
+
+  if (longTrap === "High") {
+    return {
+      title,
+      flowTone: "Fragile Flow",
+      investorRead: "Crowded upside",
+      confirmationNeed: "Wait for cleaner reset",
+      body: "Long-side crowding is elevated, which makes late upside entries vulnerable to a shakeout. Even if the broader phase is not markdown, Order Flow is warning that price needs cleaner follow-through or a reset before risk improves.",
+    };
+  }
+
+  if (shortTrap === "High") {
+    return {
+      title,
+      flowTone: "Constructive Flow",
+      investorRead: "Short squeeze risk",
+      confirmationNeed: "Needs macro support",
+      body: "Short-side crowding is elevated, increasing the chance of a squeeze or local rebound. That can improve timing, but it does not confirm a larger reversal until Market and Intelligence support the move.",
+    };
+  }
+
+  if (pressure === "Upside Pull") {
+    return {
+      title,
+      flowTone: "Mixed Flow",
+      investorRead: "Demand improving, phase not aligned",
+      confirmationNeed: "Needs structural confirmation",
+      body: `Liquidity is being pulled upward, but the broader structure is still classified as ${phase.toLowerCase()}. This is an early improvement in flow rather than a confirmed recovery; watch for continued support and a phase read that catches up before becoming more aggressive.`,
+    };
+  }
+
+  if (pressure === "Downside Pull") {
+    return {
+      title,
+      flowTone: "Mixed Flow",
+      investorRead: "Downside pressure, base unconfirmed",
+      confirmationNeed: "Needs support to hold",
+      body: `Downside liquidity is currently more actionable, but the broader structure is ${phase.toLowerCase()} rather than confirmed markdown. The market may still stabilise, so wait for a defended support zone and improving pressure instead of treating the pull as a standalone sell signal.`,
+    };
+  }
+
+  if (phase === "Accumulation" || phase === "Markup") {
+    return {
+      title,
+      flowTone: "Mixed Flow",
+      investorRead: "Structure constructive, flow undecided",
+      confirmationNeed: "Needs directional pressure",
+      body: `The broader structure is ${phase.toLowerCase()}, but neither side currently has a clear liquidity advantage. This keeps the longer-term backdrop constructive without providing clean timing; wait for pressure to align before increasing exposure.`,
+    };
+  }
+
+  if (phase === "Distribution" || phase === "Markdown") {
+    return {
+      title,
+      flowTone: "Mixed Flow",
+      investorRead: "Structure fragile, flow undecided",
+      confirmationNeed: "Needs downside or recovery confirmation",
+      body: `The broader structure is ${phase.toLowerCase()}, but current flow is not decisive enough to confirm continuation. Treat rallies carefully and wait for either renewed downside pressure or a clear support reaction before changing risk.`,
+    };
+  }
+
+  return {
+    title,
+    flowTone: "Mixed Flow",
+    investorRead: "No clear dominance",
+    confirmationNeed: "Needs broader confirmation",
+    body: "Order Flow is currently balanced and does not provide a clean directional edge. Read it as a confirmation layer alongside Market and Intelligence, not as a standalone buy or sell decision.",
+  };
 }
 
 function getMarketLink(pressureLabel, wyckoffPhase) {
