@@ -5084,11 +5084,15 @@ function getDcaMacroContext(weeklyKlines, price, supportLevel, atr14Pct) {
 }
 
 function getDcaPresentation(status, supportReaction, entryContext) {
-  const statusColor = status === "Core Accumulation Zone" || status === "Strong DCA Zone"
-    ? "#00d09c"
-    : status === "Wait for DCA zone" || status === "Pause DCA"
-      ? "#ff5c5c"
-      : "#f5b942";
+  const statusColor = status === "Core Accumulation Zone"
+    ? "#4da3ff"
+    : status === "Strong DCA Zone"
+      ? "#00d09c"
+      : status === "Small DCA"
+        ? "#ff8a1f"
+        : status === "Wait for DCA zone" || status === "Pause DCA"
+          ? "#ff5c5c"
+          : "#f5b942";
   const supportColor = supportReaction === "Held with reaction" || supportReaction === "Swept and reclaimed"
     ? "#00d09c"
     : supportReaction === "Broken"
