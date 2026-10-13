@@ -14,7 +14,9 @@ app.use(express.json());
 // set REVELIX_MIN_APP_VERSION=1.4 in the deployed backend environment.
 const APP_MINIMUM_VERSION = process.env.REVELIX_MIN_APP_VERSION || "1.5";
 const APP_LATEST_VERSION = process.env.REVELIX_LATEST_APP_VERSION || APP_MINIMUM_VERSION;
-const APP_UPDATE_URL = process.env.REVELIX_UPDATE_URL || "https://apps.apple.com/";
+const APP_UPDATE_URL =
+  process.env.REVELIX_UPDATE_URL ||
+  "https://apps.apple.com/us/app/revelix-bitcoin-clarity/id6761470341";
 
 const CACHE = new Map();
 const INFLIGHT = new Map();
