@@ -12,7 +12,7 @@ app.use(express.json());
 
 // Keep the default below the upcoming 1.4 release. After 1.4 is available,
 // set REVELIX_MIN_APP_VERSION=1.4 in the deployed backend environment.
-const APP_MINIMUM_VERSION = process.env.REVELIX_MIN_APP_VERSION || "1.2";
+const APP_MINIMUM_VERSION = process.env.REVELIX_MIN_APP_VERSION || "1.4";
 const APP_LATEST_VERSION = process.env.REVELIX_LATEST_APP_VERSION || APP_MINIMUM_VERSION;
 const APP_UPDATE_URL = process.env.REVELIX_UPDATE_URL || "https://apps.apple.com/";
 
@@ -4930,8 +4930,14 @@ function getTrapEngine(perf7d, perf30d, rangePos30, shortVolatilityPct) {
 }
 
 function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
+  const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
+  const minSupportDistancePct = Math.max(safeAtr * 0.3, 0.5);
+  const validFallback = Number.isFinite(fallbackLevel) && fallbackLevel < price * (1 - minSupportDistancePct / 100)
+    ? fallbackLevel
+    : null;
+
   if (!Array.isArray(h4Klines) || !h4Klines.length || !Number.isFinite(price) || price <= 0) {
-    return Number.isFinite(fallbackLevel) ? fallbackLevel : null;
+    return validFallback;
   }
 
   // Use completed 4H candles and candle bodies for the anchor. A wick can
@@ -4944,9 +4950,8 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     close: number(candle[4], null),
   })).filter((candle) => [candle.open, candle.high, candle.low, candle.close].every((value) => Number.isFinite(value) && value > 0));
 
-  if (candles.length < 5) return Number.isFinite(fallbackLevel) ? fallbackLevel : null;
+  if (candles.length < 5) return validFallback;
 
-  const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
   const clusterTolerancePct = Math.max(safeAtr * 0.35, 0.6);
   const touchTolerancePct = Math.max(safeAtr * 0.45, 0.9);
   const candidates = [];
@@ -4965,11 +4970,12 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     const closesAbove = related.filter((item) => item.close >= bodyLow).length;
     const recency = index / candles.length;
     const distancePct = ((price - bodyLow) / price) * 100;
+    if (distancePct < minSupportDistancePct) continue;
     const score = touches * 2 + closesAbove + recency - distancePct * 0.12;
     candidates.push({ level: bodyLow, score });
   }
 
-  if (!candidates.length) return Number.isFinite(fallbackLevel) ? fallbackLevel : null;
+  if (!candidates.length) return validFallback;
   candidates.sort((a, b) => b.score - a.score || b.level - a.level);
   return candidates[0].level;
 }
@@ -4991,6 +4997,7 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
   const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
   const testTolerancePct = Math.max(safeAtr * 0.4, 0.8);
   const breakTolerancePct = Math.max(safeAtr * 0.55, 1.0);
+  const reactionDistancePct = Math.max(safeAtr * 0.45, 0.8);
   const supportTested = candles.some((candle) => (
     candle.low <= supportLevel * (1 + testTolerancePct / 100) &&
     candle.high >= supportLevel * (1 - testTolerancePct / 100)
@@ -5001,14 +5008,15 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
   const previousCloseBelow = previousCandle?.close < supportLevel * (1 - breakTolerancePct / 100);
   const broken = Boolean(lastCloseBelow && previousCloseBelow);
   const held = supportTested && !broken && lastCandle.close >= supportLevel * (1 - breakTolerancePct / 100);
+  const movedAwayFromSupport = lastCandle.close >= supportLevel * (1 + reactionDistancePct / 100);
   const sweptAndReclaimed = held && candles.some((candle) => (
     candle.low < supportLevel * (1 - Math.max(safeAtr * 0.25, 0.5) / 100) &&
     candle.close >= supportLevel
   ));
-  const positive = held && (
+  const positive = held && movedAwayFromSupport && (
     lastCandle.close > lastCandle.open ||
     (previousCandle && previousCandle.close > previousCandle.open && lastCandle.close >= supportLevel)
-  ) || sweptAndReclaimed;
+  ) || (sweptAndReclaimed && movedAwayFromSupport);
 
   return {
     label: broken ? "Broken" : sweptAndReclaimed ? "Swept and reclaimed" : positive ? "Held with reaction" : held ? "Held" : "Unconfirmed",
@@ -5141,7 +5149,13 @@ function buildDcaOpportunity({
   const macro = getDcaMacroContext(weeklyKlines, price, structuralSupportLevel, atr14Pct);
   const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
   const supportDistance = number(nearestSupport?.distancePct, 999);
-  const nearSupport = supportDistance <= Math.max(safeAtr * 1.35, 3.5);
+  // DCA should only become actionable in the lower part of the range and
+  // when the support is meaningfully below price. A level at 0.0% distance
+  // is not a DCA zone; it is simply the current price being labelled as one.
+  const minimumDcaDistancePct = Math.max(safeAtr * 0.35, 0.7);
+  const nearSupport = supportDistance >= minimumDcaDistancePct && supportDistance <= Math.max(safeAtr * 1.25, 3.25);
+  const lowerRange = Number(rangePos30) <= 50;
+  const deepLowerRange = Number(rangePos30) <= 38;
   const extendedFromSupport = supportDistance >= Math.max(safeAtr * 2.2, 6.5);
   const downsidePressure = pressure?.label === "Downside Pull";
   const upsideCrowding = traps?.longTrap === "High" && Number(rangePos30) > 68;
@@ -5195,20 +5209,33 @@ function buildDcaOpportunity({
     });
   }
 
-  if (!nearestSupport || supportReaction.broken || (downsidePressure && !supportReaction.held)) {
+  if (
+    !nearestSupport ||
+    !nearSupport ||
+    !lowerRange ||
+    supportReaction.broken ||
+    (downsidePressure && !supportReaction.positive)
+  ) {
     return decorateDca({
       ...base,
       status: "Wait for DCA zone",
-      intro: "The lower side is still being tested, but there is no confirmed DCA reaction yet.",
-      action: "Keep the next tranche in reserve. If support breaks, wait for the next lower liquidity zone instead of averaging into weakness blindly.",
+      intro: "Price is not yet giving DCA a sufficiently asymmetric entry. A support level alone is not enough to trigger a buy zone.",
+      action: "Keep the next tranche in reserve. Wait for a meaningful lower-range test, a real reaction away from support and improving pressure.",
       rationale: supportReaction.broken
         ? "The nearest support has been decisively lost on the recent 4H read."
-        : `Downside pressure is ${pressure?.label === "Downside Pull" ? "still dominant" : "not yet confirmed as supportive"}.`,
-      watch: "A reclaim and hold of the nearest lower zone, followed by improving pressure.",
+        : !lowerRange
+          ? "Price is not in the lower half of its recent range, so the risk/reward is not attractive enough for DCA."
+          : !nearSupport
+            ? "The nearest structural support is either too close to price to create a meaningful discount or too far away to call an active zone."
+            : `Downside pressure is ${pressure?.label === "Downside Pull" ? "still dominant" : "not yet confirmed as supportive"}.`,
+      watch: "A lower-range test, a confirmed reaction away from the zone and improving pressure before adding a tranche.",
     });
   }
 
-  if (nearSupport && supportReaction.positive && (pressure?.bias === "Demand-Dominant" || traps?.shortTrap === "Medium" || traps?.shortTrap === "High")) {
+  const confirmedReaction = lowerRange && nearSupport && supportReaction.positive;
+  const constructivePressure = pressure?.bias === "Demand-Dominant" || traps?.shortTrap === "Medium" || traps?.shortTrap === "High";
+
+  if (confirmedReaction && constructivePressure) {
     if (macro.tier === "Core") {
       return decorateDca({
         ...base,
@@ -5241,7 +5268,23 @@ function buildDcaOpportunity({
     });
   }
 
-  if (nearSupport && supportReaction.held) {
+  // A confirmed reaction can justify only a small tactical tranche. It must
+  // still be in the lower half of the range; holding support by itself is not
+  // a buy condition.
+  if (confirmedReaction) {
+    return decorateDca({
+      ...base,
+      status: "Confirmed Small DCA",
+      intro: "A lower liquidity zone is being defended and the recent 4H reaction is supportive. Confirmation improved, but this remains a small tactical tranche.",
+      action: "A small, predefined DCA tranche can be considered here. Keep follow-up capital available instead of treating the confirmation as permission to size up aggressively.",
+      rationale: `Support is ${supportReaction.label.toLowerCase()}, while broader pressure is ${pressure?.label || "still developing"}. This is a confirmed tactical reaction read, not a promise of immediate upside.`,
+      watch: "Whether price keeps holding the zone and develops higher 4H closes without renewed downside pressure.",
+    });
+  }
+
+  // "Held" without a measurable move away from support is still unconfirmed.
+  // Keep capital in reserve until the market proves that buyers reacted.
+  if (nearSupport && lowerRange && supportReaction.held && !downsidePressure) {
     return decorateDca({
       ...base,
       status: "Small DCA",
