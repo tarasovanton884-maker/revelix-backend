@@ -4933,8 +4933,13 @@ function getTrapEngine(perf7d, perf30d, rangePos30, shortVolatilityPct) {
 
 function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
   const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
-  const minSupportDistancePct = Math.max(safeAtr * 0.3, 0.5);
-  const validFallback = Number.isFinite(fallbackLevel) && fallbackLevel < price * (1 - minSupportDistancePct / 100)
+  // A support level can be very close to price and still be structurally
+  // valid. Distance is used later to decide whether the setup is attractive
+  // enough for DCA; it must not decide whether the support exists at all.
+  // Keep only a tiny safety gap so a level cannot be labelled below price
+  // when it is actually at/above the current price.
+  const minimumStructuralGapPct = 0.1;
+  const validFallback = Number.isFinite(fallbackLevel) && fallbackLevel < price * (1 - minimumStructuralGapPct / 100)
     ? fallbackLevel
     : null;
 
@@ -4972,7 +4977,6 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     const closesAbove = related.filter((item) => item.close >= bodyLow).length;
     const recency = index / candles.length;
     const distancePct = ((price - bodyLow) / price) * 100;
-    if (distancePct < minSupportDistancePct) continue;
     const score = touches * 2 + closesAbove + recency - distancePct * 0.12;
     candidates.push({ level: bodyLow, score });
   }
@@ -5163,6 +5167,7 @@ function buildDcaOpportunity({
   // is not a DCA zone; it is simply the current price being labelled as one.
   const minimumDcaDistancePct = Math.max(safeAtr * 0.35, 0.7);
   const nearSupport = hasValidSupport && supportDistance >= minimumDcaDistancePct && supportDistance <= Math.max(safeAtr * 1.25, 3.25);
+  const supportTooClose = hasValidSupport && supportDistance < minimumDcaDistancePct;
   const lowerRange = Number(rangePos30) <= 50;
   const deepLowerRange = Number(rangePos30) <= 38;
   const extendedFromSupport = hasValidSupport && supportDistance >= Math.max(safeAtr * 2.2, 6.5);
@@ -5228,16 +5233,22 @@ function buildDcaOpportunity({
     return decorateDca({
       ...base,
       status: "Wait for DCA zone",
-      intro: "Price is not yet giving DCA a sufficiently asymmetric entry. A support level alone is not enough to trigger a buy zone.",
+      intro: supportTooClose
+        ? "A support zone is visible, but price is still too close to it for a sufficiently asymmetric DCA entry."
+        : "Price is not yet giving DCA a sufficiently asymmetric entry. A support level alone is not enough to trigger a buy zone.",
       action: "Keep the next tranche in reserve. Wait for a meaningful lower-range test, a real reaction away from support and improving pressure.",
       rationale: supportReaction.broken
         ? "The nearest support has been decisively lost on the recent 4H read."
         : !lowerRange
           ? "Price is not in the lower half of its recent range, so the risk/reward is not attractive enough for DCA."
+          : supportTooClose
+            ? `Support is only ${supportDistance.toFixed(1)}% below price — too close for a clean DCA entry. Wait for either a deeper move to the next meaningful support, or confirmation that this zone holds before adding here.`
           : !nearSupport
             ? "The nearest structural support is either too close to price to create a meaningful discount or too far away to call an active zone."
             : `Downside pressure is ${pressure?.label === "Downside Pull" ? "still dominant" : "not yet confirmed as supportive"}.`,
-      watch: "A lower-range test, a confirmed reaction away from the zone and improving pressure before adding a tranche.",
+      watch: supportTooClose
+        ? "A deeper test or brief sweep of support, followed by a confirmed reaction and improving pressure."
+        : "A lower-range test, a confirmed reaction away from the zone and improving pressure before adding a tranche.",
     });
   }
 
