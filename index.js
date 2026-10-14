@@ -5150,15 +5150,22 @@ function buildDcaOpportunity({
   const supportReaction = getDcaSupportReaction(h4Klines, structuralSupportLevel, atr14Pct);
   const macro = getDcaMacroContext(weeklyKlines, price, structuralSupportLevel, atr14Pct);
   const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
-  const supportDistance = number(nearestSupport?.distancePct, 999);
+  // Do not turn a missing support into a fake 999% distance. The previous
+  // fallback caused the extension branch below to fire and produced messages
+  // such as "The nearest lower zone is 999.0% away" even when no valid DCA
+  // support had been calculated.
+  const supportDistance = Number.isFinite(nearestSupport?.distancePct) && nearestSupport.distancePct >= 0
+    ? nearestSupport.distancePct
+    : null;
+  const hasValidSupport = Number.isFinite(supportDistance) && supportDistance > 0;
   // DCA should only become actionable in the lower part of the range and
   // when the support is meaningfully below price. A level at 0.0% distance
   // is not a DCA zone; it is simply the current price being labelled as one.
   const minimumDcaDistancePct = Math.max(safeAtr * 0.35, 0.7);
-  const nearSupport = supportDistance >= minimumDcaDistancePct && supportDistance <= Math.max(safeAtr * 1.25, 3.25);
+  const nearSupport = hasValidSupport && supportDistance >= minimumDcaDistancePct && supportDistance <= Math.max(safeAtr * 1.25, 3.25);
   const lowerRange = Number(rangePos30) <= 50;
   const deepLowerRange = Number(rangePos30) <= 38;
-  const extendedFromSupport = supportDistance >= Math.max(safeAtr * 2.2, 6.5);
+  const extendedFromSupport = hasValidSupport && supportDistance >= Math.max(safeAtr * 2.2, 6.5);
   const downsidePressure = pressure?.label === "Downside Pull";
   const upsideCrowding = traps?.longTrap === "High" && Number(rangePos30) > 68;
   const fastExtension = Number(perf7d) > Math.max(safeAtr * 1.4, 3.5) && Number(rangePos30) > 72;
