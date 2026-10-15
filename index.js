@@ -3689,7 +3689,7 @@ function getRecoveryStatus(price, ma200w, perf30d, perf90d) {
         note: "Recovery evidence is mixed and not yet strong enough for a higher-conviction interpretation.",
     };
 }
-function getPhaseStage(phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d) {
+function getPhaseStage(phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d, currentZone = "") {
     const fromHigh = yearlyHigh > 0 ? (yearlyHigh - price) / yearlyHigh : 0;
     const maRatio = ma200w > 0 ? price / ma200w : 1;
     const ddAbs = Math.abs(drawdown);
@@ -3703,7 +3703,11 @@ function getPhaseStage(phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf
         if (perf30d < -10 && fromHigh > 0.35) {
             return "Late Capitulation";
         }
-        if (perf30d > -4 && maRatio >= 0.95) {
+        // "Selling Pressure Easing" is reserved for a genuinely deep
+        // value-area test. A mild pullback around the middle of the cycle
+        // must not be described as a bottoming process.
+        const deepValueTest = currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone";
+        if (ddAbs >= 40 && deepValueTest && perf30d > -4 && perf90d < 5 && maRatio >= 0.85) {
             return "Selling Pressure Easing";
         }
         return "Early Capitulation";
@@ -3803,18 +3807,32 @@ function getPhaseOutlook(phase, recovery, stage, confidence = "Low") {
                 note: "Downside pressure is reaching a late corrective stage. A durable bottom still requires a confirmed reaction and reclaim.",
             };
         }
-        if (stage === "Selling Pressure Easing") {
+        if (stage === "Selling Pressure Easing" && improving) {
+            if (!confirmedEnough) {
+                return {
+                    label: "Pressure easing — bottom not confirmed",
+                    color: "#f5b942",
+                    note: "Selling pressure is easing on the shorter read, but the evidence is still too weak to call this a bottoming attempt. The market remains in the second sell-off and can still retest lower levels.",
+                };
+            }
             return {
                 label: "Bottoming attempt with easing pressure",
                 color: "#f5b942",
                 note: "Selling pressure is fading and the market is testing a possible bottoming process, but the macro bottom is not confirmed yet.",
             };
         }
+        if (stage === "Selling Pressure Easing") {
+            return {
+                label: "Pressure easing — bottom not confirmed",
+                color: "#f5b942",
+                note: "Selling pressure is easing, but the market has not shown enough recovery evidence to call this a bottoming attempt. Further downside remains possible.",
+            };
+        }
         if (improving) {
             return {
-                label: "Bottoming attempt developing",
+                label: "Recovery signal not yet structural",
                 color: "#f5b942",
-                note: "The second sell-off is showing early signs of stabilization. This is a bottoming attempt, not a confirmed bottom or automatic buy signal.",
+                note: "Shorter-term recovery evidence is appearing, but the market has not reached the deep value conditions required for a bottoming interpretation.",
             };
         }
         return {
@@ -4413,7 +4431,7 @@ function buildMarketCyclePayload(data) {
     perf90d
   );
   const recoveryStatus = getRecoveryStatus(price, ma200w, perf30d, perf90d);
-  const phaseStage = getPhaseStage(cyclePhase.phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d);
+  const phaseStage = getPhaseStage(cyclePhase.phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d, currentZone);
   const phaseOutlook = getPhaseOutlook(
     cyclePhase.phase,
     recoveryStatus.label,
@@ -5166,9 +5184,14 @@ function buildDcaOpportunity({
   // when the support is meaningfully below price. A level at 0.0% distance
   // is not a DCA zone; it is simply the current price being labelled as one.
   const minimumDcaDistancePct = Math.max(safeAtr * 0.35, 0.7);
-  const nearSupport = hasValidSupport && supportDistance >= minimumDcaDistancePct && supportDistance <= Math.max(safeAtr * 1.25, 3.25);
-  const supportTooClose = hasValidSupport && supportDistance < minimumDcaDistancePct;
+  const maximumTacticalDistancePct = Math.max(safeAtr * 1.25, 3.25);
   const lowerRange = Number(rangePos30) <= 50;
+  const nearSupport = hasValidSupport && supportDistance >= minimumDcaDistancePct && supportDistance <= maximumTacticalDistancePct;
+  // A confirmed sweep-and-reclaim can justify a small tactical tranche even
+  // when price is still very close to support. Mere proximity or a support
+  // level that is only being held must remain a wait condition.
+  const confirmedReaction = lowerRange && hasValidSupport && supportDistance <= maximumTacticalDistancePct && supportReaction.positive;
+  const supportTooClose = hasValidSupport && supportDistance < minimumDcaDistancePct;
   const deepLowerRange = Number(rangePos30) <= 38;
   const extendedFromSupport = hasValidSupport && supportDistance >= Math.max(safeAtr * 2.2, 6.5);
   const downsidePressure = pressure?.label === "Downside Pull";
@@ -5225,7 +5248,7 @@ function buildDcaOpportunity({
 
   if (
     !nearestSupport ||
-    !nearSupport ||
+    (!nearSupport && !confirmedReaction) ||
     !lowerRange ||
     supportReaction.broken ||
     (downsidePressure && !supportReaction.positive)
@@ -5252,7 +5275,6 @@ function buildDcaOpportunity({
     });
   }
 
-  const confirmedReaction = lowerRange && nearSupport && supportReaction.positive;
   const constructivePressure = pressure?.bias === "Demand-Dominant" || traps?.shortTrap === "Medium" || traps?.shortTrap === "High";
 
   if (confirmedReaction && constructivePressure) {
