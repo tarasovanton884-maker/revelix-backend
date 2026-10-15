@@ -22,6 +22,23 @@ const CACHE = new Map();
 const INFLIGHT = new Map();
 let LAST_GOOD_TICKER = null;
 
+// DCA is a tactical layer, but its UI status should not flicker on every
+// small price update. Keep the current support anchor and status stable until
+// a competing read persists or a confirmed support break invalidates it.
+const DCA_STATE = {
+  stableStatus: null,
+  stableResult: null,
+  pendingStatus: null,
+  pendingStatusCount: 0,
+  pendingStatusSinceAt: 0,
+  lastStatusCommitAt: 0,
+  stableSupportLevel: null,
+};
+
+const DCA_STATUS_CONFIRMATION_SNAPSHOTS = 2;
+const DCA_STATUS_MIN_CHANGE_MS = 5 * 60 * 1000;
+const DCA_SUPPORT_ANCHOR_TOLERANCE_PCT = 2.5;
+
 // Binance public market data is intentionally routed through Binance's dedicated
 // market-data-only host. Binance explicitly recommends this endpoint for public
 // market data, and keeping it separate from the general API reduces exposure to
@@ -3689,7 +3706,7 @@ function getRecoveryStatus(price, ma200w, perf30d, perf90d) {
         note: "Recovery evidence is mixed and not yet strong enough for a higher-conviction interpretation.",
     };
 }
-function getPhaseStage(phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d, currentZone = "") {
+function getPhaseStage(phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d) {
     const fromHigh = yearlyHigh > 0 ? (yearlyHigh - price) / yearlyHigh : 0;
     const maRatio = ma200w > 0 ? price / ma200w : 1;
     const ddAbs = Math.abs(drawdown);
@@ -3703,11 +3720,7 @@ function getPhaseStage(phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf
         if (perf30d < -10 && fromHigh > 0.35) {
             return "Late Capitulation";
         }
-        // "Selling Pressure Easing" is reserved for a genuinely deep
-        // value-area test. A mild pullback around the middle of the cycle
-        // must not be described as a bottoming process.
-        const deepValueTest = currentZone === "Deep Value Zone" || currentZone === "Accumulation Zone";
-        if (ddAbs >= 40 && deepValueTest && perf30d > -4 && perf90d < 5 && maRatio >= 0.85) {
+        if (perf30d > -4 && maRatio >= 0.95) {
             return "Selling Pressure Easing";
         }
         return "Early Capitulation";
@@ -3807,32 +3820,18 @@ function getPhaseOutlook(phase, recovery, stage, confidence = "Low") {
                 note: "Downside pressure is reaching a late corrective stage. A durable bottom still requires a confirmed reaction and reclaim.",
             };
         }
-        if (stage === "Selling Pressure Easing" && improving) {
-            if (!confirmedEnough) {
-                return {
-                    label: "Pressure easing — bottom not confirmed",
-                    color: "#f5b942",
-                    note: "Selling pressure is easing on the shorter read, but the evidence is still too weak to call this a bottoming attempt. The market remains in the second sell-off and can still retest lower levels.",
-                };
-            }
+        if (stage === "Selling Pressure Easing") {
             return {
                 label: "Bottoming attempt with easing pressure",
                 color: "#f5b942",
                 note: "Selling pressure is fading and the market is testing a possible bottoming process, but the macro bottom is not confirmed yet.",
             };
         }
-        if (stage === "Selling Pressure Easing") {
-            return {
-                label: "Pressure easing — bottom not confirmed",
-                color: "#f5b942",
-                note: "Selling pressure is easing, but the market has not shown enough recovery evidence to call this a bottoming attempt. Further downside remains possible.",
-            };
-        }
         if (improving) {
             return {
-                label: "Recovery signal not yet structural",
+                label: "Bottoming attempt developing",
                 color: "#f5b942",
-                note: "Shorter-term recovery evidence is appearing, but the market has not reached the deep value conditions required for a bottoming interpretation.",
+                note: "The second sell-off is showing early signs of stabilization. This is a bottoming attempt, not a confirmed bottom or automatic buy signal.",
             };
         }
         return {
@@ -4431,7 +4430,7 @@ function buildMarketCyclePayload(data) {
     perf90d
   );
   const recoveryStatus = getRecoveryStatus(price, ma200w, perf30d, perf90d);
-  const phaseStage = getPhaseStage(cyclePhase.phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d, currentZone);
+  const phaseStage = getPhaseStage(cyclePhase.phase, drawdown, price, yearlyHigh, ma200w, perf30d, perf90d);
   const phaseOutlook = getPhaseOutlook(
     cyclePhase.phase,
     recoveryStatus.label,
@@ -4999,9 +4998,28 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     candidates.push({ level: bodyLow, score });
   }
 
-  if (!candidates.length) return validFallback;
+  if (!candidates.length) {
+    if (validFallback) DCA_STATE.stableSupportLevel = validFallback;
+    return validFallback;
+  }
   candidates.sort((a, b) => b.score - a.score || b.level - a.level);
-  return candidates[0].level;
+  const candidateLevel = candidates[0].level;
+  const previousLevel = DCA_STATE.stableSupportLevel;
+  const previousStillBelowPrice = Number.isFinite(previousLevel) && previousLevel < price * (1 - minimumStructuralGapPct / 100);
+  const supportDriftPct = Number.isFinite(previousLevel)
+    ? Math.abs((candidateLevel - previousLevel) / previousLevel) * 100
+    : Infinity;
+
+  // Do not let the selected support jump to another nearby candle body just
+  // because the live price moved a few dollars. Re-anchor only when the old
+  // support is no longer below price or the new structural level is materially
+  // different from it.
+  if (previousStillBelowPrice && supportDriftPct <= Math.max(safeAtr * 1.5, DCA_SUPPORT_ANCHOR_TOLERANCE_PCT)) {
+    return previousLevel;
+  }
+
+  DCA_STATE.stableSupportLevel = candidateLevel;
+  return candidateLevel;
 }
 
 function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
@@ -5009,7 +5027,14 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
     return { label: "Unconfirmed", held: false, broken: false, positive: false };
   }
 
-  const candles = h4Klines.slice(-18).map((candle) => ({
+  // Binance includes the currently forming 4H candle in the klines response.
+  // It must never confirm a support reaction or reclaim before the candle has
+  // actually closed.
+  const hasCloseTimes = h4Klines.some((candle) => Number.isFinite(number(candle?.[6], null)));
+  const closedSource = hasCloseTimes
+    ? h4Klines.filter((candle) => number(candle?.[6], null) <= Date.now())
+    : h4Klines.slice(0, -1);
+  const candles = closedSource.slice(-18).map((candle) => ({
     open: number(candle[1], null),
     high: number(candle[2], null),
     low: number(candle[3], null),
@@ -5022,7 +5047,8 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
   const testTolerancePct = Math.max(safeAtr * 0.4, 0.8);
   const breakTolerancePct = Math.max(safeAtr * 0.55, 1.0);
   const reactionDistancePct = Math.max(safeAtr * 0.45, 0.8);
-  const supportTested = candles.some((candle) => (
+  const recentCandles = candles.slice(-6);
+  const supportTested = recentCandles.some((candle) => (
     candle.low <= supportLevel * (1 + testTolerancePct / 100) &&
     candle.high >= supportLevel * (1 - testTolerancePct / 100)
   ));
@@ -5032,15 +5058,22 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
   const previousCloseBelow = previousCandle?.close < supportLevel * (1 - breakTolerancePct / 100);
   const broken = Boolean(lastCloseBelow && previousCloseBelow);
   const held = supportTested && !broken && lastCandle.close >= supportLevel * (1 - breakTolerancePct / 100);
-  const movedAwayFromSupport = lastCandle.close >= supportLevel * (1 + reactionDistancePct / 100);
-  const sweptAndReclaimed = held && candles.some((candle) => (
+  const recentSweep = recentCandles.some((candle) => (
     candle.low < supportLevel * (1 - Math.max(safeAtr * 0.25, 0.5) / 100) &&
     candle.close >= supportLevel
   ));
-  const positive = held && movedAwayFromSupport && (
+  // A reclaim needs two completed 4H closes above the reaction distance. A
+  // single close, or a price that is only a few dollars above support, is not
+  // enough to label the zone "swept and reclaimed".
+  const reclaimCloses = candles.length >= 2 && candles.slice(-2).every((candle) => (
+    candle.close >= supportLevel * (1 + reactionDistancePct / 100)
+  ));
+  const sweptAndReclaimed = held && recentSweep && reclaimCloses;
+  const positive = held && reclaimCloses && (
     lastCandle.close > lastCandle.open ||
-    (previousCandle && previousCandle.close > previousCandle.open && lastCandle.close >= supportLevel)
-  ) || (sweptAndReclaimed && movedAwayFromSupport);
+    (previousCandle && previousCandle.close > previousCandle.open && lastCandle.close >= supportLevel) ||
+    recentSweep
+  );
 
   return {
     label: broken ? "Broken" : sweptAndReclaimed ? "Swept and reclaimed" : positive ? "Held with reaction" : held ? "Held" : "Unconfirmed",
@@ -5144,6 +5177,72 @@ function getDcaPresentation(status, supportReaction, entryContext) {
   };
 }
 
+function stabilizeDcaOpportunity(candidate) {
+  const now = Date.now();
+  const candidateStatus = candidate?.status || "Wait for DCA zone";
+
+  if (!DCA_STATE.stableStatus || !DCA_STATE.stableResult) {
+    DCA_STATE.stableStatus = candidateStatus;
+    DCA_STATE.stableResult = candidate;
+    DCA_STATE.lastStatusCommitAt = now;
+    DCA_STATE.pendingStatus = null;
+    DCA_STATE.pendingStatusCount = 0;
+    DCA_STATE.pendingStatusSinceAt = 0;
+    return candidate;
+  }
+
+  if (candidateStatus === DCA_STATE.stableStatus) {
+    // Keep all current levels and explanations fresh while the status itself
+    // remains stable.
+    DCA_STATE.stableResult = candidate;
+    DCA_STATE.pendingStatus = null;
+    DCA_STATE.pendingStatusCount = 0;
+    DCA_STATE.pendingStatusSinceAt = 0;
+    return candidate;
+  }
+
+  if (DCA_STATE.pendingStatus === candidateStatus) {
+    DCA_STATE.pendingStatusCount += 1;
+  } else {
+    DCA_STATE.pendingStatus = candidateStatus;
+    DCA_STATE.pendingStatusCount = 1;
+    DCA_STATE.pendingStatusSinceAt = now;
+  }
+
+  // A confirmed 4H support break is already a strong invalidation, so it may
+  // commit immediately. Every other status transition needs two consistent
+  // reads and a short minimum dwell time to prevent UI flicker.
+  const confirmedBreak = candidate.supportReaction === "Broken";
+  const enoughSnapshots = DCA_STATE.pendingStatusCount >= DCA_STATUS_CONFIRMATION_SNAPSHOTS;
+  const enoughTime = now - (DCA_STATE.lastStatusCommitAt || 0) >= DCA_STATUS_MIN_CHANGE_MS;
+
+  if (confirmedBreak || (enoughSnapshots && enoughTime)) {
+    DCA_STATE.stableStatus = candidateStatus;
+    DCA_STATE.stableResult = candidate;
+    DCA_STATE.lastStatusCommitAt = now;
+    DCA_STATE.pendingStatus = null;
+    DCA_STATE.pendingStatusCount = 0;
+    DCA_STATE.pendingStatusSinceAt = 0;
+    return candidate;
+  }
+
+  // Keep the last committed status and its explanation visible until the new
+  // state is confirmed. Refresh market levels so the card does not look stale.
+  return {
+    ...candidate,
+    status: DCA_STATE.stableResult.status,
+    intro: DCA_STATE.stableResult.intro,
+    action: DCA_STATE.stableResult.action,
+    rationale: DCA_STATE.stableResult.rationale,
+    watch: DCA_STATE.stableResult.watch,
+    presentation: getDcaPresentation(
+      DCA_STATE.stableResult.status,
+      candidate.supportReaction,
+      candidate.entryContext
+    ),
+  };
+}
+
 function buildDcaOpportunity({
   price,
   ladder,
@@ -5181,9 +5280,12 @@ function buildDcaOpportunity({
     : null;
   const hasValidSupport = Number.isFinite(supportDistance) && supportDistance > 0;
   // DCA should only become actionable in the lower part of the range and
-  // when the support is meaningfully below price. A level at 0.0% distance
-  // is not a DCA zone; it is simply the current price being labelled as one.
-  const minimumDcaDistancePct = Math.max(safeAtr * 0.35, 0.7);
+  // while a valid lower support is still below price. The previous minimum
+  // distance gate made the signal flip to Wait on tiny moves near support
+  // (for example, a $100 move on BTC). The lower support itself is a valid
+  // small-tranche area; it should not disappear merely because price is
+  // approaching it.
+  const minimumDcaDistancePct = 0.1;
   const maximumTacticalDistancePct = Math.max(safeAtr * 1.25, 3.25);
   const lowerRange = Number(rangePos30) <= 50;
   const nearSupport = hasValidSupport && supportDistance >= minimumDcaDistancePct && supportDistance <= maximumTacticalDistancePct;
@@ -5231,8 +5333,10 @@ function buildDcaOpportunity({
     macroConfluence: macro.confluenceLabels,
   };
   const decorateDca = (result) => ({
-    ...result,
-    presentation: getDcaPresentation(result.status, supportReaction.label, entryContext),
+    ...stabilizeDcaOpportunity({
+      ...result,
+      presentation: getDcaPresentation(result.status, supportReaction.label, entryContext),
+    }),
   });
 
   if (fastExtension || slowExtension || upsideCrowding || extendedFromSupport) {
@@ -5250,8 +5354,10 @@ function buildDcaOpportunity({
     !nearestSupport ||
     (!nearSupport && !confirmedReaction) ||
     !lowerRange ||
-    supportReaction.broken ||
-    (downsidePressure && !supportReaction.positive)
+    supportReaction.broken
+    // Do not cancel Small DCA merely because pressure is still moving price
+    // toward the lower support. Cancel only on a confirmed support break;
+    // the approach itself is exactly where a small tactical tranche belongs.
   ) {
     return decorateDca({
       ...base,
@@ -5311,8 +5417,7 @@ function buildDcaOpportunity({
   }
 
   // A confirmed reaction can justify only a small tactical tranche. It must
-  // still be in the lower half of the range; holding support by itself is not
-  // a buy condition.
+  // still be in the lower half of the range.
   if (confirmedReaction) {
     return decorateDca({
       ...base,
@@ -5324,16 +5429,18 @@ function buildDcaOpportunity({
     });
   }
 
-  // "Held" without a measurable move away from support is still unconfirmed.
-  // Keep capital in reserve until the market proves that buyers reacted.
-  if (nearSupport && lowerRange && supportReaction.held && !downsidePressure) {
+  // A valid lower support creates a small accumulation window before the
+  // support is reached. This is intentionally not dependent on a completed
+  // 4H reaction: the user may deploy a small tranche while price approaches
+  // the zone, then reserve the next tranche if support breaks.
+  if (nearSupport && lowerRange && !supportReaction.broken) {
     return decorateDca({
       ...base,
       status: "Small DCA",
       intro: "A structural support zone is being tested and the setup is constructive enough for cautious accumulation.",
-      action: "Use only a small tranche and leave room for a deeper sweep or stronger confirmation.",
-      rationale: `Confirmed support is ${supportDistance.toFixed(1)}% below price and the recent 4H read is ${supportReaction.label.toLowerCase()}.`,
-      watch: "A stronger reaction, improving pressure and confirmation that the zone continues to hold.",
+      action: "A small predefined tranche can be considered while price remains above the lower support. Keep reserve capital in case the zone breaks and the next support becomes the better entry.",
+      rationale: `The nearest structural support is ${supportDistance.toFixed(1)}% below price; the current 4H read is ${supportReaction.label.toLowerCase()}.`,
+      watch: "Whether the lower support holds. A confirmed break should cancel this tranche and shift attention to the next meaningful zone.",
     });
   }
 
