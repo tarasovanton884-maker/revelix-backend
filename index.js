@@ -38,6 +38,10 @@ const DCA_STATE = {
 const DCA_STATUS_CONFIRMATION_SNAPSHOTS = 2;
 const DCA_STATUS_MIN_CHANGE_MS = 5 * 60 * 1000;
 const DCA_SUPPORT_ANCHOR_TOLERANCE_PCT = 2.5;
+// A candle body only a few dollars below live price is not a meaningful
+// support zone. Keep a real discount between price and the selected anchor so
+// normal tick movement cannot manufacture a new "support" level.
+const DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT = 0.75;
 
 // Binance public market data is intentionally routed through Binance's dedicated
 // market-data-only host. Binance explicitly recommends this endpoint for public
@@ -4950,12 +4954,13 @@ function getTrapEngine(perf7d, perf30d, rangePos30, shortVolatilityPct) {
 
 function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
   const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
-  // A support level can be very close to price and still be structurally
-  // valid. Distance is used later to decide whether the setup is attractive
-  // enough for DCA; it must not decide whether the support exists at all.
-  // Keep only a tiny safety gap so a level cannot be labelled below price
-  // when it is actually at/above the current price.
-  const minimumStructuralGapPct = 0.1;
+  // Do not accept a level that is only a few dollars below live price. The
+  // support must be meaningfully lower than price; otherwise every small tick
+  // can turn a nearby candle body into a new "support" zone.
+  const minimumStructuralGapPct = Math.max(
+    DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT,
+    safeAtr * 0.35
+  );
   const validFallback = Number.isFinite(fallbackLevel) && fallbackLevel < price * (1 - minimumStructuralGapPct / 100)
     ? fallbackLevel
     : null;
@@ -4985,7 +4990,11 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     const bodyLow = Math.min(candle.open, candle.close);
     const left = Math.min(candles[index - 1].open, candles[index - 1].close);
     const right = Math.min(candles[index + 1].open, candles[index + 1].close);
-    if (bodyLow >= price || bodyLow > left || bodyLow > right) continue;
+    if (
+      bodyLow >= price * (1 - minimumStructuralGapPct / 100) ||
+      bodyLow > left ||
+      bodyLow > right
+    ) continue;
 
     const related = candles.filter((item) => (
       Math.abs((Math.min(item.open, item.close) - bodyLow) / bodyLow) * 100 <= clusterTolerancePct
@@ -5005,16 +5014,16 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
   candidates.sort((a, b) => b.score - a.score || b.level - a.level);
   const candidateLevel = candidates[0].level;
   const previousLevel = DCA_STATE.stableSupportLevel;
-  const previousStillBelowPrice = Number.isFinite(previousLevel) && previousLevel < price * (1 - minimumStructuralGapPct / 100);
+  const previousStillMeaningfullyBelowPrice = Number.isFinite(previousLevel) && previousLevel < price * (1 - minimumStructuralGapPct / 100);
   const supportDriftPct = Number.isFinite(previousLevel)
     ? Math.abs((candidateLevel - previousLevel) / previousLevel) * 100
     : Infinity;
 
-  // Do not let the selected support jump to another nearby candle body just
-  // because the live price moved a few dollars. Re-anchor only when the old
-  // support is no longer below price or the new structural level is materially
+  // Do not let the selected support jump to another candle body just because
+  // live price moved a few dollars. Re-anchor only when the old support is no
+  // longer meaningfully below price or the new structural level is materially
   // different from it.
-  if (previousStillBelowPrice && supportDriftPct <= Math.max(safeAtr * 1.5, DCA_SUPPORT_ANCHOR_TOLERANCE_PCT)) {
+  if (previousStillMeaningfullyBelowPrice && supportDriftPct <= Math.max(safeAtr * 1.5, DCA_SUPPORT_ANCHOR_TOLERANCE_PCT)) {
     return previousLevel;
   }
 
@@ -5280,12 +5289,12 @@ function buildDcaOpportunity({
     : null;
   const hasValidSupport = Number.isFinite(supportDistance) && supportDistance > 0;
   // DCA should only become actionable in the lower part of the range and
-  // while a valid lower support is still below price. The previous minimum
-  // distance gate made the signal flip to Wait on tiny moves near support
-  // (for example, a $100 move on BTC). The lower support itself is a valid
-  // small-tranche area; it should not disappear merely because price is
-  // approaching it.
-  const minimumDcaDistancePct = 0.1;
+  // while a valid lower support is still meaningfully below price. This avoids
+  // turning a $20–$100 tick into a new support or DCA zone.
+  const minimumDcaDistancePct = Math.max(
+    DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT,
+    safeAtr * 0.35
+  );
   const maximumTacticalDistancePct = Math.max(safeAtr * 1.25, 3.25);
   const lowerRange = Number(rangePos30) <= 50;
   const nearSupport = hasValidSupport && supportDistance >= minimumDcaDistancePct && supportDistance <= maximumTacticalDistancePct;
