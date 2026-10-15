@@ -3613,7 +3613,7 @@ function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, curr
         {
             phase: "Second Sell-Off",
             score: secondSellScore,
-            desc: "The model suggests BTC may be in a deeper corrective leg after consolidation, where downside pressure can still dominate before a full bottom is formed.",
+            desc: "The model suggests BTC may be in a deeper corrective leg after consolidation, where downside pressure can still dominate before a durable recovery base is formed.",
         },
         {
             phase: "Macro Bottom",
@@ -3817,27 +3817,27 @@ function getPhaseOutlook(phase, recovery, stage, confidence = "Low") {
             return {
                 label: "Capitulation risk",
                 color: "#ff5c5c",
-                note: "Downside pressure is reaching a late corrective stage. A durable bottom still requires a confirmed reaction and reclaim.",
+                note: "Downside pressure is reaching a late corrective stage. A durable recovery still requires a confirmed reaction and reclaim.",
             };
         }
         if (stage === "Selling Pressure Easing") {
             return {
-                label: "Bottoming attempt with easing pressure",
+                label: "Pressure easing — stabilization not confirmed",
                 color: "#f5b942",
-                note: "Selling pressure is fading and the market is testing a possible bottoming process, but the macro bottom is not confirmed yet.",
+                note: "Selling pressure is fading, but the market remains in a corrective phase. Stabilization is not yet confirmed and this is not an automatic buy signal.",
             };
         }
         if (improving) {
             return {
-                label: "Bottoming attempt developing",
+                label: "Early stabilization developing",
                 color: "#f5b942",
-                note: "The second sell-off is showing early signs of stabilization. This is a bottoming attempt, not a confirmed bottom or automatic buy signal.",
+                note: "The second sell-off is showing early signs of stabilization, but the recovery structure is not confirmed and this is not an automatic buy signal.",
             };
         }
         return {
             label: "Downside still developing",
             color: "#ff5c5c",
-            note: "The second sell-off remains vulnerable to further weakness before a durable bottom can form.",
+            note: "The second sell-off remains vulnerable to further weakness before a durable recovery base can form.",
         };
     }
 
@@ -4142,7 +4142,7 @@ function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, str
     if (phase === "Second Sell-Off") {
         return {
             baseProbability: `${probabilities.base}%`,
-            baseScenario: "BTC may still move lower or remain unstable before a more durable macro bottom and recovery attempt can develop.",
+            baseScenario: "BTC may still move lower or remain unstable before a more durable recovery attempt can develop.",
             altProbability: `${probabilities.alternative}%`,
             altScenario: "Selling pressure may fade earlier than expected, allowing the market to transition into accumulation sooner.",
             riskTrigger,
@@ -4185,7 +4185,7 @@ function getScenarioEngine(phase, currentZone, price, ma200w, safeZoneUpper, str
         baseProbability: `${probabilities.base}%`,
         baseScenario: "BTC remains vulnerable to further correction before a clearer consolidation phase can stabilize the structure.",
         altProbability: `${probabilities.alternative}%`,
-        altScenario: "If downside momentum fades, the market may transition sideways before a stronger bottoming attempt develops.",
+        altScenario: "If downside momentum fades, the market may transition sideways before a stronger recovery attempt develops.",
         riskTrigger,
         recoveryTrigger,
     };
@@ -4221,7 +4221,7 @@ function getInvestorStance(phase, currentZone, recoveryLabel, perf30d, phaseStag
                 deployment: "Staged",
                 strategy: "Build in tranches",
                 riskApproach: "Defined",
-                note: "The deeper sell-off has improved long-term asymmetry, but entries should still be split into tranches and confirmed by support rather than treated as a confirmed bottom.",
+                note: "The deeper sell-off has improved long-term asymmetry, but entries should still be split into tranches and confirmed by support rather than treated as a confirmed recovery.",
             };
         }
 
@@ -4334,7 +4334,7 @@ function getSignalInterpretation(phase, recoveryLabel, currentZone) {
     if (phase === "Second Sell-Off") {
         return {
             title: "How to read this signal",
-            body: "The model currently leans toward a second sell-off phase. This does not mean the decline must continue immediately, but it suggests downside pressure still looks more relevant than a confirmed macro bottom or recovery.",
+            body: "The model currently leans toward a second sell-off phase. This does not mean the decline must continue immediately, but it suggests downside pressure still looks more relevant than a confirmed recovery.",
         };
     }
     if (phase === "Peak") {
@@ -5643,7 +5643,7 @@ function getFlowInterpretation(pressureLabel, wyckoffPhase, longTrap, shortTrap)
 
 function getMarketLink(pressureLabel, wyckoffPhase) {
   if (pressureLabel === "Upside Pull" && (wyckoffPhase === "Accumulation" || wyckoffPhase === "Markup")) return ["Use Market to check whether the broader phase also supports recovery or accumulation.", "Use Intelligence to confirm if Investor Attractiveness remains strong while flow improves.", "Watch whether Risk Level stays constructive as liquidity pressure leans upward."];
-  if (pressureLabel === "Downside Pull" || wyckoffPhase === "Markdown") return ["Use Market to confirm whether the cycle still leans toward sell-off risk rather than confirmed bottoming.", "Use Intelligence to check whether Risk Level is deteriorating with the weaker flow picture.", "Watch if Investor Bias weakens as downside liquidity remains more actionable."];
+  if (pressureLabel === "Downside Pull" || wyckoffPhase === "Markdown") return ["Use Market to confirm whether the cycle still leans toward sell-off risk rather than confirmed recovery.", "Use Intelligence to check whether Risk Level is deteriorating with the weaker flow picture.", "Watch if Investor Bias weakens as downside liquidity remains more actionable."];
   return ["Use Market to confirm whether the macro phase is improving or still mixed.", "Use Intelligence to check whether attractiveness and risk remain aligned with this flow backdrop.", "Treat this screen as the timing layer, not the only layer."];
 }
 
