@@ -33,11 +33,11 @@ const DCA_STATE = {
   pendingStatusSinceAt: 0,
   lastStatusCommitAt: 0,
   stableSupportLevel: null,
+  stableSupportAnchorPrice: null,
 };
 
 const DCA_STATUS_CONFIRMATION_SNAPSHOTS = 2;
 const DCA_STATUS_MIN_CHANGE_MS = 5 * 60 * 1000;
-const DCA_SUPPORT_ANCHOR_TOLERANCE_PCT = 2.5;
 // A candle body only a few dollars below live price is not a meaningful
 // support zone. Keep a real discount between price and the selected anchor so
 // normal tick movement cannot manufacture a new "support" level.
@@ -4966,6 +4966,10 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     : null;
 
   if (!Array.isArray(h4Klines) || !h4Klines.length || !Number.isFinite(price) || price <= 0) {
+    if (validFallback) {
+      DCA_STATE.stableSupportLevel = validFallback;
+      DCA_STATE.stableSupportAnchorPrice = price;
+    }
     return validFallback;
   }
 
@@ -5007,27 +5011,43 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     candidates.push({ level: bodyLow, score });
   }
 
+  // Once a structural support has been selected, keep it as the active anchor
+  // while price approaches it, wicks through it, or trades slightly below it.
+  // The 0.75% gap is only for selecting a NEW anchor; it must not invalidate
+  // an already established support just because live price moved closer.
+  const previousLevel = DCA_STATE.stableSupportLevel;
+  if (Number.isFinite(previousLevel)) {
+    const previousReaction = getDcaSupportReaction(h4Klines, previousLevel, atr14Pct);
+    const maximumTemporaryMoveBelowPct = Math.max(safeAtr * 0.75, 1.0);
+    const priceStillNearPreviousSupport = previousLevel <= price * (1 + maximumTemporaryMoveBelowPct / 100);
+    const anchorPrice = Number(DCA_STATE.stableSupportAnchorPrice);
+    const supportWasMeaningfulWhenSelected = Number.isFinite(anchorPrice)
+      ? previousLevel < anchorPrice * (1 - minimumStructuralGapPct / 100)
+      : previousLevel < price * (1 - minimumStructuralGapPct / 100);
+
+    if (!previousReaction.broken && supportWasMeaningfulWhenSelected && priceStillNearPreviousSupport) {
+      return previousLevel;
+    }
+
+    if (previousReaction.broken) {
+      DCA_STATE.stableSupportLevel = null;
+      DCA_STATE.stableSupportAnchorPrice = null;
+    }
+  }
+
   if (!candidates.length) {
-    if (validFallback) DCA_STATE.stableSupportLevel = validFallback;
+    if (validFallback) {
+      DCA_STATE.stableSupportLevel = validFallback;
+      DCA_STATE.stableSupportAnchorPrice = price;
+    }
     return validFallback;
   }
+
   candidates.sort((a, b) => b.score - a.score || b.level - a.level);
   const candidateLevel = candidates[0].level;
-  const previousLevel = DCA_STATE.stableSupportLevel;
-  const previousStillMeaningfullyBelowPrice = Number.isFinite(previousLevel) && previousLevel < price * (1 - minimumStructuralGapPct / 100);
-  const supportDriftPct = Number.isFinite(previousLevel)
-    ? Math.abs((candidateLevel - previousLevel) / previousLevel) * 100
-    : Infinity;
-
-  // Do not let the selected support jump to another candle body just because
-  // live price moved a few dollars. Re-anchor only when the old support is no
-  // longer meaningfully below price or the new structural level is materially
-  // different from it.
-  if (previousStillMeaningfullyBelowPrice && supportDriftPct <= Math.max(safeAtr * 1.5, DCA_SUPPORT_ANCHOR_TOLERANCE_PCT)) {
-    return previousLevel;
-  }
 
   DCA_STATE.stableSupportLevel = candidateLevel;
+  DCA_STATE.stableSupportAnchorPrice = price;
   return candidateLevel;
 }
 
