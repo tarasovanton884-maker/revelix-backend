@@ -5335,6 +5335,10 @@ function buildDcaOpportunity({
     label: "Confirmed Support",
   } : null;
   const supportReaction = getDcaSupportReaction(h4Klines, structuralSupportLevel, atr14Pct);
+  const priceBelowSupport = Boolean(nearestSupport && nearestSupport.distancePct < 0);
+  const priceBelowSupportDistance = priceBelowSupport
+    ? Math.abs(nearestSupport.distancePct)
+    : null;
   const supportDisplay = getDcaSupportDisplay(
     price,
     structuralSupportLevel,
@@ -5384,7 +5388,12 @@ function buildDcaOpportunity({
             : "Waiting for lower liquidity";
 
   const base = {
-    lowerZone: nearestSupport ? {
+    // The legacy frontend always appends "below price" whenever lowerZone is
+    // present. If live price is above the selected support, that is correct.
+    // If price is below it, hide only the display object and let the backend
+    // rationale explain the unconfirmed/confirmed break instead. Calculations
+    // continue to use nearestSupport and supportReaction normally.
+    lowerZone: nearestSupport && !priceBelowSupport ? {
       level: nearestSupport.level,
       distancePct: nearestSupport.distancePct,
       displayDistancePct: supportDisplay.distancePct,
@@ -5445,6 +5454,8 @@ function buildDcaOpportunity({
       action: "Keep the next tranche in reserve. Wait for a meaningful lower-range test, a real reaction away from support and improving pressure.",
       rationale: supportReaction.broken
         ? "The nearest support has been decisively lost."
+        : priceBelowSupport
+          ? `Price is ${priceBelowSupportDistance.toFixed(1)}% below the selected support zone. The break is not confirmed yet, so the active zone is being monitored before shifting to the next lower support.`
         : !lowerRange
           ? "Price is not in the lower half of its recent range, so the risk/reward is not attractive enough for DCA."
           : supportTooClose
