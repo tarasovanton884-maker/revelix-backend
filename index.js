@@ -5018,14 +5018,16 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
   const previousLevel = DCA_STATE.stableSupportLevel;
   if (Number.isFinite(previousLevel)) {
     const previousReaction = getDcaSupportReaction(h4Klines, previousLevel, atr14Pct);
-    const maximumTemporaryMoveBelowPct = Math.max(safeAtr * 0.75, 1.0);
-    const priceStillNearPreviousSupport = previousLevel <= price * (1 + maximumTemporaryMoveBelowPct / 100);
     const anchorPrice = Number(DCA_STATE.stableSupportAnchorPrice);
     const supportWasMeaningfulWhenSelected = Number.isFinite(anchorPrice)
       ? previousLevel < anchorPrice * (1 - minimumStructuralGapPct / 100)
       : previousLevel < price * (1 - minimumStructuralGapPct / 100);
 
-    if (!previousReaction.broken && supportWasMeaningfulWhenSelected && priceStillNearPreviousSupport) {
+    // Keep the established anchor until the break is confirmed. Do not let a
+    // live-price move, a wick, or a temporary move farther below the level
+    // silently replace it with a newer candidate. The next support becomes
+    // active only after getDcaSupportReaction() confirms the break.
+    if (!previousReaction.broken && supportWasMeaningfulWhenSelected) {
       return previousLevel;
     }
 
@@ -5206,6 +5208,41 @@ function getDcaPresentation(status, supportReaction, entryContext) {
   };
 }
 
+function getDcaSupportDisplay(price, supportLevel, supportReaction) {
+  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(supportLevel) || supportLevel <= 0) {
+    return {
+      position: "No clear support",
+      distancePct: null,
+      description: "No clear lower support is currently defined.",
+    };
+  }
+
+  const signedDistancePct = ((price - supportLevel) / price) * 100;
+  const distancePct = Math.abs(signedDistancePct);
+  const levelText = `$${Math.round(supportLevel).toLocaleString("en-US")}`;
+  const reaction = String(supportReaction || "Unconfirmed");
+
+  if (signedDistancePct < 0) {
+    return {
+      position: "Price below support",
+      distancePct,
+      description: reaction === "Broken"
+        ? `Price is ${distancePct.toFixed(1)}% below the support zone. The break is confirmed.`
+        : `Price is ${distancePct.toFixed(1)}% below the support zone. The break is not confirmed yet.`,
+    };
+  }
+
+  const reactionText = reaction === "Unconfirmed"
+    ? "reaction is not confirmed yet"
+    : reaction.toLowerCase();
+
+  return {
+    position: "Support below price",
+    distancePct,
+    description: `Support zone at ${levelText} is ${reactionText}, ${distancePct.toFixed(1)}% below price.`,
+  };
+}
+
 function stabilizeDcaOpportunity(candidate) {
   const now = Date.now();
   const candidateStatus = candidate?.status || "Wait for DCA zone";
@@ -5298,6 +5335,11 @@ function buildDcaOpportunity({
     label: "Confirmed Support",
   } : null;
   const supportReaction = getDcaSupportReaction(h4Klines, structuralSupportLevel, atr14Pct);
+  const supportDisplay = getDcaSupportDisplay(
+    price,
+    structuralSupportLevel,
+    supportReaction.label
+  );
   const macro = getDcaMacroContext(weeklyKlines, price, structuralSupportLevel, atr14Pct);
   const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
   // Do not turn a missing support into a fake 999% distance. The previous
@@ -5345,9 +5387,15 @@ function buildDcaOpportunity({
     lowerZone: nearestSupport ? {
       level: nearestSupport.level,
       distancePct: nearestSupport.distancePct,
+      displayDistancePct: supportDisplay.distancePct,
+      pricePosition: supportDisplay.position,
+      description: supportDisplay.description,
       density: nearestSupport.density,
       label: nearestSupport.label,
     } : null,
+    supportDescription: supportDisplay.description,
+    supportDistancePct: supportDisplay.distancePct,
+    supportPricePosition: supportDisplay.position,
     liquidityZone: nearestLiquidity ? {
       level: nearestLiquidity.level,
       distancePct: nearestLiquidity.distancePct,
@@ -5396,7 +5444,7 @@ function buildDcaOpportunity({
         : "Price is not yet giving DCA a sufficiently asymmetric entry. A support level alone is not enough to trigger a buy zone.",
       action: "Keep the next tranche in reserve. Wait for a meaningful lower-range test, a real reaction away from support and improving pressure.",
       rationale: supportReaction.broken
-        ? "The nearest support has been decisively lost on the recent 4H read."
+        ? "The nearest support has been decisively lost."
         : !lowerRange
           ? "Price is not in the lower half of its recent range, so the risk/reward is not attractive enough for DCA."
           : supportTooClose
@@ -5438,10 +5486,10 @@ function buildDcaOpportunity({
     return decorateDca({
       ...base,
       status: "Confirmed Small DCA",
-      intro: "A lower liquidity zone is being defended and the recent 4H reaction is supportive. Confirmation improved, but this remains a small tactical tranche.",
+      intro: "A lower liquidity zone is being defended and the current reaction is supportive. Confirmation improved, but this remains a small tactical tranche.",
       action: "A small, predefined DCA tranche can be considered here. Keep follow-up capital available instead of treating the confirmation as permission to size up aggressively.",
       rationale: `Support is ${supportReaction.label.toLowerCase()}, while pressure is ${pressure?.label || "balanced"}. This is a tactical reaction read, not a promise of immediate upside.`,
-      watch: "Whether price keeps holding the zone and develops higher 4H closes without renewed downside pressure.",
+      watch: "Whether price keeps holding the zone and builds stronger follow-through without renewed downside pressure.",
     });
   }
 
@@ -5451,10 +5499,10 @@ function buildDcaOpportunity({
     return decorateDca({
       ...base,
       status: "Confirmed Small DCA",
-      intro: "A lower liquidity zone is being defended and the recent 4H reaction is supportive. Confirmation improved, but this remains a small tactical tranche.",
+      intro: "A lower liquidity zone is being defended and the current reaction is supportive. Confirmation improved, but this remains a small tactical tranche.",
       action: "A small, predefined DCA tranche can be considered here. Keep follow-up capital available instead of treating the confirmation as permission to size up aggressively.",
       rationale: `Support is ${supportReaction.label.toLowerCase()}, while broader pressure is ${pressure?.label || "still developing"}. This is a confirmed tactical reaction read, not a promise of immediate upside.`,
-      watch: "Whether price keeps holding the zone and develops higher 4H closes without renewed downside pressure.",
+      watch: "Whether price keeps holding the zone and builds stronger follow-through without renewed downside pressure.",
     });
   }
 
@@ -5468,7 +5516,7 @@ function buildDcaOpportunity({
       status: "Small DCA",
       intro: "A structural support zone is being tested and the setup is constructive enough for cautious accumulation.",
       action: "A small predefined tranche can be considered while price remains above the lower support. Keep reserve capital in case the zone breaks and the next support becomes the better entry.",
-      rationale: `The nearest structural support is ${supportDistance.toFixed(1)}% below price; the current 4H read is ${supportReaction.label.toLowerCase()}.`,
+      rationale: `The nearest structural support is ${supportDistance.toFixed(1)}% below price; the current reaction is ${supportReaction.label.toLowerCase()}.`,
       watch: "Whether the lower support holds. A confirmed break should cancel this tranche and shift attention to the next meaningful zone.",
     });
   }
@@ -5479,7 +5527,7 @@ function buildDcaOpportunity({
     intro: "The broader market is not purely defensive, but the current price is not giving DCA a strong enough tactical edge.",
     action: "Stay selective and wait for price to approach lower liquidity with a clearer support reaction before adding size.",
     rationale: `Pressure is ${pressure?.label || "mixed"}, while the nearest support reaction remains ${supportReaction.label.toLowerCase()}.`,
-    watch: "A cleaner test of lower liquidity and confirmation from the 4H structure.",
+    watch: "A cleaner test of lower liquidity and confirmation from price structure.",
   });
 }
 
