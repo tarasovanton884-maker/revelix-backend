@@ -5055,7 +5055,7 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
 
 function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
   if (!Array.isArray(h4Klines) || !h4Klines.length || !Number.isFinite(supportLevel) || supportLevel <= 0) {
-    return { label: "Unconfirmed", held: false, broken: false, positive: false };
+    return { label: "Not yet tested", held: false, broken: false, positive: false };
   }
 
   // Binance includes the currently forming 4H candle in the klines response.
@@ -5072,7 +5072,7 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
     close: number(candle[4], null),
   })).filter((candle) => [candle.open, candle.high, candle.low, candle.close].every((value) => Number.isFinite(value) && value > 0));
 
-  if (!candles.length) return { label: "Unconfirmed", held: false, broken: false, positive: false };
+  if (!candles.length) return { label: "Not yet tested", held: false, broken: false, positive: false };
 
   const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
   const testTolerancePct = Math.max(safeAtr * 0.4, 0.8);
@@ -5107,7 +5107,7 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
   );
 
   return {
-    label: broken ? "Broken" : sweptAndReclaimed ? "Swept and reclaimed" : positive ? "Held with reaction" : held ? "Held" : "Unconfirmed",
+    label: broken ? "Broken" : sweptAndReclaimed ? "Swept and reclaimed" : positive ? "Held with reaction" : held ? "Held" : "Not yet tested",
     held,
     broken,
     positive,
@@ -5220,7 +5220,7 @@ function getDcaSupportDisplay(price, supportLevel, supportReaction) {
   const signedDistancePct = ((price - supportLevel) / price) * 100;
   const distancePct = Math.abs(signedDistancePct);
   const levelText = `$${Math.round(supportLevel).toLocaleString("en-US")}`;
-  const reaction = String(supportReaction || "Unconfirmed");
+  const reaction = String(supportReaction || "Not yet tested");
 
   if (signedDistancePct < 0) {
     return {
@@ -5232,7 +5232,7 @@ function getDcaSupportDisplay(price, supportLevel, supportReaction) {
     };
   }
 
-  const reactionText = reaction === "Unconfirmed"
+  const reactionText = reaction === "Not yet tested" || reaction === "Unconfirmed"
     ? "reaction is not confirmed yet"
     : reaction.toLowerCase();
 
@@ -5525,7 +5525,9 @@ function buildDcaOpportunity({
     return decorateDca({
       ...base,
       status: "Small DCA",
-      intro: "A structural support zone is being tested and the setup is constructive enough for cautious accumulation.",
+      intro: supportReaction.held
+        ? "A structural support zone is being tested and the setup is constructive enough for cautious accumulation."
+        : "Price is approaching a structural support zone and the setup is constructive enough for cautious accumulation.",
       action: "A small predefined tranche can be considered while price remains above the lower support. Keep reserve capital in case the zone breaks and the next support becomes the better entry.",
       rationale: `The nearest structural support is ${supportDistance.toFixed(1)}% below price; the current reaction is ${supportReaction.label.toLowerCase()}.`,
       watch: "Whether the lower support holds. A confirmed break should cancel this tranche and shift attention to the next meaningful zone.",
