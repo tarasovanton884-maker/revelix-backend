@@ -43,6 +43,16 @@ const DCA_STATUS_MIN_CHANGE_MS = 5 * 60 * 1000;
 // normal tick movement cannot manufacture a new "support" level.
 const DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT = 0.75;
 
+// User-facing endpoints should not wait indefinitely for a stale snapshot to
+// refresh. Give a refresh a short chance to finish; if an upstream is slow,
+// return the last good snapshot and let the next request receive the refresh.
+const USER_SNAPSHOT_REFRESH_WAIT_MS = 2500;
+
+// These feeds are supplementary to the live Binance price. A slow sentiment or
+// dominance provider must never hold the dashboard hostage for several retries.
+const OPTIONAL_UPSTREAM_TIMEOUT_MS = 2500;
+const OPTIONAL_UPSTREAM_ATTEMPTS = 1;
+
 // Binance public market data is intentionally routed through Binance's dedicated
 // market-data-only host. Binance explicitly recommends this endpoint for public
 // market data, and keeping it separate from the general API reduces exposure to
@@ -365,9 +375,27 @@ async function withStaleWhileRevalidate(key, ttlMs, fn, options = {}) {
 
   const stale = getCache(key, true);
   if (stale !== null) {
-    refreshCacheInBackground(key, ttlMs, fn, options).catch((error) => {
+    const refreshPromise = refreshCacheInBackground(key, ttlMs, fn, options);
+    refreshPromise.catch((error) => {
       console.warn(`Background refresh failed for ${key}:`, error.message);
     });
+
+    // Prefer a fresh result when it is already close, but never make the app
+    // wait through a slow upstream retry cycle just to refresh an old snapshot.
+    try {
+      const refreshed = await Promise.race([
+        refreshPromise,
+        new Promise((resolve) => setTimeout(() => resolve(null), USER_SNAPSHOT_REFRESH_WAIT_MS)),
+      ]);
+
+      if (refreshed !== null && refreshed !== undefined) {
+        return { value: refreshed, cacheStatus: "refreshed" };
+      }
+    } catch (error) {
+      // The stale snapshot remains the safe fallback for transient upstream
+      // failures. The background promise already logs its own failure.
+    }
+
     return { value: stale, cacheStatus: "stale" };
   }
 
@@ -608,9 +636,14 @@ async function fetchJsonDirect(url, timeoutMs = 10000, isBinance = false) {
   }
 }
 
-async function fetchJsonWithStaleFallback(url, cacheKey, timeoutMs = 10000) {
+async function fetchJsonWithStaleFallback(
+  url,
+  cacheKey,
+  timeoutMs = 10000,
+  attempts = 3
+) {
   try {
-    return await fetchJsonWithRetry(url, timeoutMs, 3);
+    return await fetchJsonWithRetry(url, timeoutMs, attempts);
   } catch (error) {
     const stale = getCache(cacheKey, true);
 
@@ -2770,7 +2803,9 @@ async function fetchCoinGeckoGlobal() {
     async () => {
       const data = await fetchJsonWithStaleFallback(
         "https://api.coingecko.com/api/v3/global",
-        "coingecko_global"
+        "coingecko_global",
+        OPTIONAL_UPSTREAM_TIMEOUT_MS,
+        OPTIONAL_UPSTREAM_ATTEMPTS
       );
 
       if (!data) {
@@ -2790,7 +2825,9 @@ async function fetchFearGreed() {
     async () => {
       const data = await fetchJsonWithStaleFallback(
         "https://api.alternative.me/fng/?limit=1&format=json",
-        "fear_greed"
+        "fear_greed",
+        OPTIONAL_UPSTREAM_TIMEOUT_MS,
+        OPTIONAL_UPSTREAM_ATTEMPTS
       );
 
 if (!data) {
@@ -4543,7 +4580,9 @@ const fearGreed = fearGreedResult.status === "fulfilled" ? fearGreedResult.value
 async function getMarketDataPayload() {
   const [tickerResult, klinesResult, globalDataResult, fearGreedResult, h4Result, weeklyResult] = await Promise.allSettled([
     fetchBinanceTicker24h(),
-    fetchBinanceKlinesDaily(120),
+    // Reuse the larger daily snapshot already required by Market Advanced;
+    // downstream calculations slice the history they need locally.
+    fetchBinanceKlinesDaily(400),
     fetchCoinGeckoGlobal(),
     fetchFearGreed(),
     fetchBinanceKlines4h(180),
@@ -5845,7 +5884,8 @@ function buildOrderFlowModel(metrics) {
 async function getOrderFlowPayload() {
   const [tickerResult, dailyResult, h4Result] = await Promise.allSettled([
     fetchBinanceTicker24h(),
-    fetchBinanceKlinesDaily(120),
+    // Share the same daily snapshot with Market Data and Market Advanced.
+    fetchBinanceKlinesDaily(400),
     fetchBinanceKlines4h(180),
   ]);
 
