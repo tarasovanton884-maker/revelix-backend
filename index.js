@@ -3699,13 +3699,13 @@ function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, curr
         previousStableResult && previousStablePhase !== best.phase
             ? best.score - previousStableResult.score
             : gap;
-    // On a cold start, do not let a low-confidence snapshot rewrite the
-    // displayed macro phase immediately. The cycle state may be empty after
-    // a Render restart, while the underlying market has not actually moved.
-    const initialCandidatePhase =
-        !previousStablePhase && gap < MARKET_CYCLE_STRONG_GAP_THRESHOLD
-            ? "Consolidation"
-            : best.phase;
+    // On a cold start, use the phase actually supported by the current score
+    // model. Do not force an arbitrary "Consolidation" label merely because
+    // the previous in-memory phase was lost during a deploy/restart: that can
+    // incorrectly turn a live Second Sell-Off read into Pre-Breakout. The
+    // normal confirmation and hysteresis rules still protect subsequent
+    // transitions from one noisy snapshot.
+    const initialCandidatePhase = best.phase;
     const stablePhase = applyMarketCyclePhaseConfirmation(initialCandidatePhase, switchGap);
     const stableResult = scored.find((item) => item.phase === stablePhase) || best;
     const phasePending = stablePhase !== best.phase;
