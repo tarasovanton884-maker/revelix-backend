@@ -62,7 +62,16 @@ const BINANCE_MARKET_BASE_URL =
 
 // Global Binance backoff state. A single 429/418 applies to the outbound IP, not
 // to one endpoint, so every Binance request must respect the same cooldown.
-let BINANCE_REQUEST_QUEUE = Promise.resolve();
+// Keep a small concurrency cap instead of serializing every endpoint. The app
+// requests several independent Binance datasets during a cold start; full
+// serialization makes the dashboard wait unnecessarily while still not adding
+// meaningful safety beyond a bounded queue.
+const BINANCE_MAX_CONCURRENT_REQUESTS = Math.max(
+  1,
+  Math.min(3, Number(process.env.BINANCE_MAX_CONCURRENT_REQUESTS) || 3)
+);
+let BINANCE_ACTIVE_REQUESTS = 0;
+const BINANCE_WAITING_REQUESTS = [];
 
 const BINANCE_RATE_STATE = {
   cooldownUntil: 0,
@@ -553,15 +562,32 @@ async function fetchJson(url, timeoutMs = 10000) {
     return fetchJsonDirect(url, timeoutMs, false);
   }
 
-  // Serialize Binance calls. warmCoreSnapshots builds several payloads in parallel;
-  // without a queue they can all hit Binance at the same instant. Queuing means a
-  // first 429/418 activates cooldown before the remaining calls ever reach the wire.
-  const queuedRequest = BINANCE_REQUEST_QUEUE
-    .catch(() => null)
-    .then(() => fetchJsonDirect(url, timeoutMs, true));
+  return new Promise((resolve, reject) => {
+    BINANCE_WAITING_REQUESTS.push({
+      task: () => fetchJsonDirect(url, timeoutMs, true),
+      resolve,
+      reject,
+    });
+    pumpBinanceRequests();
+  });
+}
 
-  BINANCE_REQUEST_QUEUE = queuedRequest.catch(() => null);
-  return queuedRequest;
+function pumpBinanceRequests() {
+  while (
+    BINANCE_ACTIVE_REQUESTS < BINANCE_MAX_CONCURRENT_REQUESTS &&
+    BINANCE_WAITING_REQUESTS.length > 0
+  ) {
+    const request = BINANCE_WAITING_REQUESTS.shift();
+    BINANCE_ACTIVE_REQUESTS += 1;
+
+    Promise.resolve()
+      .then(request.task)
+      .then(request.resolve, request.reject)
+      .finally(() => {
+        BINANCE_ACTIVE_REQUESTS -= 1;
+        pumpBinanceRequests();
+      });
+  }
 }
 
 async function fetchJsonDirect(url, timeoutMs = 10000, isBinance = false) {
@@ -5266,8 +5292,8 @@ function getDcaSupportDisplay(price, supportLevel, supportReaction) {
       position: "Price below support",
       distancePct,
       description: reaction === "Broken"
-        ? `Price is ${distancePct.toFixed(1)}% below the support zone. The break is confirmed.`
-        : `Price is ${distancePct.toFixed(1)}% below the support zone. The break is not confirmed yet.`,
+        ? `Price is ${distancePct.toFixed(1)}% below the previous support at ${levelText}. The break is confirmed.`
+        : `Price is ${distancePct.toFixed(1)}% below the previous support at ${levelText}. The break is not confirmed yet.`,
     };
   }
 
@@ -5377,6 +5403,9 @@ function buildDcaOpportunity({
   const priceBelowSupport = Boolean(nearestSupport && nearestSupport.distancePct < 0);
   const priceBelowSupportDistance = priceBelowSupport
     ? Math.abs(nearestSupport.distancePct)
+    : null;
+  const previousSupportLevelText = Number.isFinite(nearestSupport?.level)
+    ? `$${Math.round(nearestSupport.level).toLocaleString("en-US")}`
     : null;
   const supportDisplay = getDcaSupportDisplay(
     price,
@@ -5492,9 +5521,13 @@ function buildDcaOpportunity({
         : "Price is not yet giving DCA a sufficiently asymmetric entry. A support level alone is not enough to trigger a buy zone.",
       action: "Keep the next tranche in reserve. Wait for a meaningful lower-range test, a real reaction away from support and improving pressure.",
       rationale: supportReaction.broken
-        ? "The nearest support has been decisively lost."
+        ? previousSupportLevelText
+          ? `Previous support at ${previousSupportLevelText} has been decisively lost. No new structural support is confirmed yet, so wait for the next meaningful lower zone.`
+          : "The previous support has been decisively lost. No new structural support is confirmed yet, so wait for the next meaningful lower zone."
         : priceBelowSupport
-          ? `Price is ${priceBelowSupportDistance.toFixed(1)}% below the selected support zone. The break is not confirmed yet, so the active zone is being monitored before shifting to the next lower support.`
+          ? previousSupportLevelText
+            ? `Price is ${priceBelowSupportDistance.toFixed(1)}% below the previous support at ${previousSupportLevelText}. The break is not confirmed yet, so the zone is being monitored before shifting to the next lower support.`
+            : `Price is ${priceBelowSupportDistance.toFixed(1)}% below the previous support. The break is not confirmed yet, so the zone is being monitored before shifting to the next lower support.`
         : !lowerRange
           ? "Price is not in the lower half of its recent range, so the risk/reward is not attractive enough for DCA."
           : supportTooClose
