@@ -1862,7 +1862,10 @@ const MARKET_CYCLE_LOW_GAP_THRESHOLD = 1.5;
 const MARKET_CYCLE_STRONG_GAP_THRESHOLD = 3.2;
 const MARKET_CYCLE_STATE_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
 const MARKET_CYCLE_STATE_SCHEMA_VERSION = 2;
-const MARKET_CYCLE_STATE_PERSIST_INTERVAL_MS = 60 * 60 * 1000;
+// Persist the confirmed phase frequently enough that a normal deploy/restart
+// cannot lose the latest macro read simply because the last hourly write has
+// not happened yet. This does not change the phase formulas or DCA logic.
+const MARKET_CYCLE_STATE_PERSIST_INTERVAL_MS = 5 * 60 * 1000;
 const VALID_MARKET_CYCLE_PHASES = new Set([
   "Peak",
   "First Sell-Off",
@@ -3673,14 +3676,18 @@ function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, curr
     // momentum and a drawdown above roughly one third of ATH are materially
     // stronger evidence for the Second Sell-Off phase.
     const deepCorrectionRead =
-        athDrawdownAbs >= 30 &&
-        perf30d < 0 &&
-        perf90d <= 2 &&
-        position < 0.6;
+        athDrawdownAbs >= 28 &&
+        perf30d <= -2 &&
+        perf90d <= 8 &&
+        position < 0.65;
     if (deepCorrectionRead) {
-        secondSellScore += 3.0;
-        firstSellScore -= 2.4;
-        consolidationScore -= 0.8;
+        // In a materially deep correction, the broad First Sell-Off band can
+        // otherwise win on a cold start even though the structure is already
+        // consistent with the later corrective leg. Keep that from resetting
+        // the confirmed macro read after a deployment.
+        secondSellScore += 4.0;
+        firstSellScore -= 3.2;
+        consolidationScore -= 1.0;
     }
 
     const scored = [
