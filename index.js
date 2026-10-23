@@ -3676,10 +3676,10 @@ function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, curr
     // momentum and a drawdown above roughly one third of ATH are materially
     // stronger evidence for the Second Sell-Off phase.
     const deepCorrectionRead =
-        athDrawdownAbs >= 28 &&
+        athDrawdownAbs >= 34 &&
         perf30d <= -2 &&
-        perf90d <= 8 &&
-        position < 0.65;
+        position < 0.55 &&
+        distanceFromHighPct >= 24;
     if (deepCorrectionRead) {
         // In a materially deep correction, the broad First Sell-Off band can
         // otherwise win on a cold start even though the structure is already
