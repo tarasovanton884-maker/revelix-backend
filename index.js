@@ -1874,7 +1874,12 @@ const VALID_MARKET_CYCLE_PHASES = new Set([
 function isSensitiveMarketCycleBoundary(fromPhase, toPhase) {
   return (
     (fromPhase === "Consolidation" && toPhase === "Second Sell-Off") ||
-    (fromPhase === "Second Sell-Off" && toPhase === "Consolidation")
+    (fromPhase === "Second Sell-Off" && toPhase === "Consolidation") ||
+    // First and Second Sell-Off are adjacent macro interpretations. A
+    // borderline score should not move between them on one refresh, and a
+    // restart should not make that boundary look more decisive than it is.
+    (fromPhase === "First Sell-Off" && toPhase === "Second Sell-Off") ||
+    (fromPhase === "Second Sell-Off" && toPhase === "First Sell-Off")
   );
 }
 
@@ -3661,6 +3666,23 @@ function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, curr
     if (perf30d < -12 || perf30d > 12) {
         consolidationScore -= 1;
     }
+
+    // A deep corrective structure must not be misclassified as a First
+    // Sell-Off merely because the drawdown still sits inside the broad
+    // 20-38% first-selloff band. Around the lower range, weak 30/90-day
+    // momentum and a drawdown above roughly one third of ATH are materially
+    // stronger evidence for the Second Sell-Off phase.
+    const deepCorrectionRead =
+        athDrawdownAbs >= 32 &&
+        perf30d < -4 &&
+        perf90d <= 0 &&
+        position < 0.5;
+    if (deepCorrectionRead) {
+        secondSellScore += 2.4;
+        firstSellScore -= 2.0;
+        consolidationScore -= 0.8;
+    }
+
     const scored = [
         {
             phase: "Peak",
@@ -3734,6 +3756,7 @@ function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, curr
             topTwoGap: Number(gap.toFixed(2)),
             switchGap: Number(switchGap.toFixed(2)),
             previousStablePhase,
+            deepCorrectionRead,
             phasePending,
             pendingPhase: MARKET_CYCLE_STATE.pendingPhase,
             pendingPhaseCount: MARKET_CYCLE_STATE.pendingPhaseCount,
