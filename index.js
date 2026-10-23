@@ -5332,6 +5332,39 @@ function stabilizeDcaOpportunity(candidate) {
     return candidate;
   }
 
+  // Once a Confirmed Small DCA has been earned, do not let a short-lived
+  // news wick or a small change in distance to the same support immediately
+  // downgrade it to Small DCA/Wait. The support engine already owns the
+  // structural invalidation decision; until it reports a confirmed break,
+  // keep the last confirmed tactical read. This is structural hysteresis,
+  // not an arbitrary time-based lock.
+  const confirmedReadIsStillStructurallyValid =
+    DCA_STATE.stableStatus === "Confirmed Small DCA" &&
+    (candidateStatus === "Small DCA" || candidateStatus === "Wait for DCA zone") &&
+    candidate.supportReaction !== "Broken" &&
+    candidate.entryContext !== "Support broken" &&
+    candidate.entryContext !== "Price extended from DCA zone";
+
+  if (confirmedReadIsStillStructurallyValid) {
+    DCA_STATE.stableResult = {
+      ...candidate,
+      status: DCA_STATE.stableResult.status,
+      intro: DCA_STATE.stableResult.intro,
+      action: DCA_STATE.stableResult.action,
+      rationale: DCA_STATE.stableResult.rationale,
+      watch: DCA_STATE.stableResult.watch,
+      presentation: getDcaPresentation(
+        DCA_STATE.stableResult.status,
+        candidate.supportReaction,
+        candidate.entryContext
+      ),
+    };
+    DCA_STATE.pendingStatus = null;
+    DCA_STATE.pendingStatusCount = 0;
+    DCA_STATE.pendingStatusSinceAt = 0;
+    return DCA_STATE.stableResult;
+  }
+
   if (DCA_STATE.pendingStatus === candidateStatus) {
     DCA_STATE.pendingStatusCount += 1;
   } else {
@@ -5576,16 +5609,19 @@ function buildDcaOpportunity({
     });
   }
 
-  // A confirmed reaction can justify only a small tactical tranche. It must
-  // still be in the lower half of the range.
+  // A confirmed reaction alone is not enough for the stronger label. If the
+  // support reaction is positive but pressure is not yet constructive, keep
+  // the opportunity at Small DCA. This makes Confirmed Small DCA harder to
+  // earn while the structural stabilizer above keeps it from flickering once
+  // it has actually been earned.
   if (confirmedReaction) {
     return decorateDca({
       ...base,
-      status: "Confirmed Small DCA",
-      intro: "A lower liquidity zone is being defended and the current reaction is supportive. Confirmation improved, but this remains a small tactical tranche.",
-      action: "A small, predefined DCA tranche can be considered here. Keep follow-up capital available instead of treating the confirmation as permission to size up aggressively.",
-      rationale: `Support is ${supportReaction.label.toLowerCase()}, while broader pressure is ${pressure?.label || "still developing"}. This is a confirmed tactical reaction read, not a promise of immediate upside.`,
-      watch: "Whether price keeps holding the zone and builds stronger follow-through without renewed downside pressure.",
+      status: "Small DCA",
+      intro: "Support has reacted, but broader pressure is not fully constructive yet. A small tactical tranche may be considered with reserve capital kept back.",
+      action: "A small predefined tranche can be considered, but keep follow-up capital available until pressure improves and the reaction develops further.",
+      rationale: `Support is ${supportReaction.label.toLowerCase()}, while broader pressure is ${pressure?.label || "still developing"}. The reaction is positive, but the stronger confirmation threshold has not been met yet.`,
+      watch: "Whether support continues to hold and broader pressure improves without renewed downside.",
     });
   }
 
