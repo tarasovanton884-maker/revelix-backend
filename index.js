@@ -37,7 +37,6 @@ const DCA_STATE = {
 };
 
 const DCA_STATUS_CONFIRMATION_SNAPSHOTS = 2;
-const DCA_STATUS_MIN_CHANGE_MS = 5 * 60 * 1000;
 // A candle body only a few dollars below live price is not a meaningful
 // support zone. Keep a real discount between price and the selected anchor so
 // normal tick movement cannot manufacture a new "support" level.
@@ -5362,20 +5361,40 @@ function stabilizeDcaOpportunity(candidate) {
     return candidate;
   }
 
-  // Once a Confirmed Small DCA has been earned, do not let a short-lived
-  // news wick or a small change in distance to the same support immediately
-  // downgrade it to Small DCA/Wait. The support engine already owns the
-  // structural invalidation decision; until it reports a confirmed break,
-  // keep the last confirmed tactical read. This is structural hysteresis,
-  // not an arbitrary time-based lock.
-  const confirmedReadIsStillStructurallyValid =
-    DCA_STATE.stableStatus === "Confirmed Small DCA" &&
-    (candidateStatus === "Small DCA" || candidateStatus === "Wait for DCA zone") &&
+  // Keep an earned DCA tier while the same lower support remains active.
+  // Small price moves can cross distance/macro-zone thresholds and make the
+  // candidate tier weaker even though the structural setup has not changed.
+  // Apply this to every DCA tier, not only Confirmed Small DCA. A real support
+  // break, an extended price move, leaving the lower half of the range, or a
+  // Pause DCA read can still downgrade/invalidate the setup.
+  const dcaStatusRank = {
+    "Wait for DCA zone": 0,
+    "Small DCA": 1,
+    "Confirmed Small DCA": 2,
+    "Strong DCA Zone": 3,
+    "Core Accumulation Zone": 4,
+    "Pause DCA": -1,
+  };
+  const stableSupport = Number(DCA_STATE.stableResult?.lowerZone?.level);
+  const candidateSupport = Number(candidate?.lowerZone?.level);
+  const sameSupportAnchor =
+    Number.isFinite(stableSupport) &&
+    Number.isFinite(candidateSupport) &&
+    candidateSupport === stableSupport;
+  const stableTier = dcaStatusRank[DCA_STATE.stableStatus] ?? 0;
+  const candidateTier = dcaStatusRank[candidateStatus] ?? 0;
+  const earnedTierStillStructurallyValid =
+    stableTier > 0 &&
+    candidateTier >= 0 &&
+    candidateTier < stableTier &&
+    candidateStatus !== "Pause DCA" &&
+    sameSupportAnchor &&
+    candidate.inLowerRange !== false &&
     candidate.supportReaction !== "Broken" &&
     candidate.entryContext !== "Support broken" &&
     candidate.entryContext !== "Price extended from DCA zone";
 
-  if (confirmedReadIsStillStructurallyValid) {
+  if (earnedTierStillStructurallyValid) {
     DCA_STATE.stableResult = {
       ...candidate,
       status: DCA_STATE.stableResult.status,
@@ -5408,9 +5427,8 @@ function stabilizeDcaOpportunity(candidate) {
   // reads and a short minimum dwell time to prevent UI flicker.
   const confirmedBreak = candidate.supportReaction === "Broken";
   const enoughSnapshots = DCA_STATE.pendingStatusCount >= DCA_STATUS_CONFIRMATION_SNAPSHOTS;
-  const enoughTime = now - (DCA_STATE.lastStatusCommitAt || 0) >= DCA_STATUS_MIN_CHANGE_MS;
 
-  if (confirmedBreak || (enoughSnapshots && enoughTime)) {
+  if (confirmedBreak || enoughSnapshots) {
     DCA_STATE.stableStatus = candidateStatus;
     DCA_STATE.stableResult = candidate;
     DCA_STATE.lastStatusCommitAt = now;
@@ -5544,6 +5562,7 @@ function buildDcaOpportunity({
     } : null,
     supportReaction: supportReaction.label,
     entryContext,
+    inLowerRange: lowerRange,
     dcaTier: macro.tier,
     macroZone: macro.zone,
     macroContext: macro.context,
