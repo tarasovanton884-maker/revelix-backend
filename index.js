@@ -3673,13 +3673,13 @@ function getCyclePhase(price, yearlyHigh, yearlyLow, ath, drawdown, ma200w, curr
     // momentum and a drawdown above roughly one third of ATH are materially
     // stronger evidence for the Second Sell-Off phase.
     const deepCorrectionRead =
-        athDrawdownAbs >= 32 &&
-        perf30d < -4 &&
-        perf90d <= 0 &&
-        position < 0.5;
+        athDrawdownAbs >= 30 &&
+        perf30d < 0 &&
+        perf90d <= 2 &&
+        position < 0.6;
     if (deepCorrectionRead) {
-        secondSellScore += 2.4;
-        firstSellScore -= 2.0;
+        secondSellScore += 3.0;
+        firstSellScore -= 2.4;
         consolidationScore -= 0.8;
     }
 
