@@ -93,6 +93,10 @@ const ATTRACTIVENESS_CACHE_FILE =
 const MARKET_CYCLE_STATE_CACHE_FILE =
   process.env.MARKET_CYCLE_STATE_CACHE_FILE ||
   path.join(process.env.RENDER_DISK_MOUNT_PATH || "/tmp", "revelix_market_cycle_state.json");
+const DCA_STATE_CACHE_FILE =
+  process.env.DCA_STATE_CACHE_FILE ||
+  path.join(process.env.RENDER_DISK_MOUNT_PATH || "/tmp", "revelix_dca_state.json");
+const DCA_STATE_SCHEMA_VERSION = 1;
 
 
 function isValidTicker(ticker) {
@@ -5348,6 +5352,7 @@ function stabilizeDcaOpportunity(candidate) {
     DCA_STATE.pendingStatus = null;
     DCA_STATE.pendingStatusCount = 0;
     DCA_STATE.pendingStatusSinceAt = 0;
+    writePersistentDcaState(now);
     return candidate;
   }
 
@@ -5358,6 +5363,7 @@ function stabilizeDcaOpportunity(candidate) {
     DCA_STATE.pendingStatus = null;
     DCA_STATE.pendingStatusCount = 0;
     DCA_STATE.pendingStatusSinceAt = 0;
+    writePersistentDcaState(now);
     return candidate;
   }
 
@@ -5375,12 +5381,16 @@ function stabilizeDcaOpportunity(candidate) {
     "Core Accumulation Zone": 4,
     "Pause DCA": -1,
   };
-  const stableSupport = Number(DCA_STATE.stableResult?.lowerZone?.level);
-  const candidateSupport = Number(candidate?.lowerZone?.level);
+  const stableSupport = Number(
+    DCA_STATE.stableResult?.supportAnchorLevel ?? DCA_STATE.stableResult?.lowerZone?.level
+  );
+  const candidateSupport = Number(
+    candidate?.supportAnchorLevel ?? candidate?.lowerZone?.level ?? DCA_STATE.stableSupportLevel
+  );
   const sameSupportAnchor =
     Number.isFinite(stableSupport) &&
     Number.isFinite(candidateSupport) &&
-    candidateSupport === stableSupport;
+    Math.abs((candidateSupport - stableSupport) / stableSupport) <= 0.0025;
   const stableTier = dcaStatusRank[DCA_STATE.stableStatus] ?? 0;
   const candidateTier = dcaStatusRank[candidateStatus] ?? 0;
   const earnedTierStillStructurallyValid =
@@ -5411,6 +5421,7 @@ function stabilizeDcaOpportunity(candidate) {
     DCA_STATE.pendingStatus = null;
     DCA_STATE.pendingStatusCount = 0;
     DCA_STATE.pendingStatusSinceAt = 0;
+    writePersistentDcaState(now);
     return DCA_STATE.stableResult;
   }
 
@@ -5435,11 +5446,13 @@ function stabilizeDcaOpportunity(candidate) {
     DCA_STATE.pendingStatus = null;
     DCA_STATE.pendingStatusCount = 0;
     DCA_STATE.pendingStatusSinceAt = 0;
+    writePersistentDcaState(now);
     return candidate;
   }
 
   // Keep the last committed status and its explanation visible until the new
   // state is confirmed. Refresh market levels so the card does not look stale.
+  writePersistentDcaState(now);
   return {
     ...candidate,
     status: DCA_STATE.stableResult.status,
@@ -5454,6 +5467,66 @@ function stabilizeDcaOpportunity(candidate) {
     ),
   };
 }
+
+function readPersistentDcaState(now = Date.now()) {
+  try {
+    if (!DCA_STATE_CACHE_FILE || !fs.existsSync(DCA_STATE_CACHE_FILE)) return null;
+    const parsed = JSON.parse(fs.readFileSync(DCA_STATE_CACHE_FILE, "utf8"));
+    if (Number(parsed?.version) !== DCA_STATE_SCHEMA_VERSION) return null;
+    if (!Number.isFinite(Number(parsed?.savedAt))) return null;
+    if (!parsed?.stableStatus || !parsed?.stableResult) return null;
+    return parsed;
+  } catch (error) {
+    console.warn("Failed to read persistent DCA state:", error.message);
+    return null;
+  }
+}
+
+function writePersistentDcaState(now = Date.now()) {
+  try {
+    if (!DCA_STATE_CACHE_FILE || !DCA_STATE.stableStatus || !DCA_STATE.stableResult) return;
+    fs.mkdirSync(path.dirname(DCA_STATE_CACHE_FILE), { recursive: true });
+    const temporaryFile = `${DCA_STATE_CACHE_FILE}.tmp`;
+    fs.writeFileSync(
+      temporaryFile,
+      JSON.stringify({
+        version: DCA_STATE_SCHEMA_VERSION,
+        stableStatus: DCA_STATE.stableStatus,
+        stableResult: DCA_STATE.stableResult,
+        pendingStatus: DCA_STATE.pendingStatus,
+        pendingStatusCount: DCA_STATE.pendingStatusCount,
+        pendingStatusSinceAt: DCA_STATE.pendingStatusSinceAt,
+        lastStatusCommitAt: DCA_STATE.lastStatusCommitAt,
+        stableSupportLevel: DCA_STATE.stableSupportLevel,
+        stableSupportAnchorPrice: DCA_STATE.stableSupportAnchorPrice,
+        savedAt: now,
+      }),
+      "utf8"
+    );
+    fs.renameSync(temporaryFile, DCA_STATE_CACHE_FILE);
+  } catch (error) {
+    console.warn("Failed to persist DCA state:", error.message);
+  }
+}
+
+function hydratePersistentDcaState(now = Date.now()) {
+  const persisted = readPersistentDcaState(now);
+  if (!persisted) return;
+  DCA_STATE.stableStatus = persisted.stableStatus;
+  DCA_STATE.stableResult = persisted.stableResult;
+  DCA_STATE.pendingStatus = persisted.pendingStatus || null;
+  DCA_STATE.pendingStatusCount = Number(persisted.pendingStatusCount) || 0;
+  DCA_STATE.pendingStatusSinceAt = Number(persisted.pendingStatusSinceAt) || 0;
+  DCA_STATE.lastStatusCommitAt = Number(persisted.lastStatusCommitAt) || Number(persisted.savedAt) || now;
+  DCA_STATE.stableSupportLevel = Number.isFinite(Number(persisted.stableSupportLevel))
+    ? Number(persisted.stableSupportLevel)
+    : null;
+  DCA_STATE.stableSupportAnchorPrice = Number.isFinite(Number(persisted.stableSupportAnchorPrice))
+    ? Number(persisted.stableSupportAnchorPrice)
+    : null;
+}
+
+hydratePersistentDcaState();
 
 function buildDcaOpportunity({
   price,
@@ -5563,6 +5636,7 @@ function buildDcaOpportunity({
     supportReaction: supportReaction.label,
     entryContext,
     inLowerRange: lowerRange,
+    supportAnchorLevel: structuralSupportLevel,
     dcaTier: macro.tier,
     macroZone: macro.zone,
     macroContext: macro.context,
