@@ -5412,7 +5412,9 @@ function stabilizeDcaOpportunity(candidate) {
     candidate.inLowerRange !== false &&
     candidate.supportReaction !== "Broken" &&
     candidate.entryContext !== "Support broken" &&
-    candidate.entryContext !== "Price extended from DCA zone";
+    candidate.entryContext !== "Price extended from DCA zone" &&
+    candidate.hardSupportInvalidated !== true &&
+    !(stableTier >= 2 && candidate.pressureLabel === "Downside Pull");
 
   if (earnedTierStillStructurallyValid) {
     DCA_STATE.stableResult = {
@@ -5661,6 +5663,8 @@ function buildDcaOpportunity({
       label: nearestLiquidity.label,
     } : null,
     supportReaction: supportReaction.label,
+    pressureLabel: pressure?.label || null,
+    pressureBias: pressure?.bias || null,
     entryContext,
     inLowerRange: lowerRange,
     supportAnchorLevel: structuralSupportLevel,
