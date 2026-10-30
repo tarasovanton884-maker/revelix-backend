@@ -5184,7 +5184,11 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
 
   const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
   const testTolerancePct = Math.max(safeAtr * 0.4, 0.8);
-  const breakTolerancePct = Math.max(safeAtr * 0.55, 1.0);
+  // ATR should filter a shallow wick, but it must not expand the required
+  // break distance so much that a support remains active after several
+  // completed 4H closes below it. Keep the adaptive threshold, with a hard
+  // ceiling for high-volatility sell-offs.
+  const breakTolerancePct = Math.min(Math.max(safeAtr * 0.55, 1.0), 1.5);
   const reactionDistancePct = Math.max(safeAtr * 0.45, 0.8);
   const recentCandles = candles.slice(-6);
   const supportTested = recentCandles.some((candle) => (
