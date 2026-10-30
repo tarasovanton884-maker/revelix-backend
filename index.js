@@ -41,6 +41,11 @@ const DCA_STATUS_CONFIRMATION_SNAPSHOTS = 2;
 // support zone. Keep a real discount between price and the selected anchor so
 // normal tick movement cannot manufacture a new "support" level.
 const DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT = 0.75;
+// A large displacement below the active anchor is an invalidation even
+// before two completed 4H closes are available. This prevents a violent move
+// from keeping yesterday's DCA tier alive while a new zone is still forming.
+const DCA_HARD_DISPLACEMENT_PCT = 2.0;
+const DCA_HARD_DISPLACEMENT_ATR_MULTIPLIER = 0.85;
 
 // User-facing endpoints should not wait indefinitely for a stale snapshot to
 // refresh. Give a refresh a short chance to finish; if an upstream is slow,
@@ -5117,6 +5122,11 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
   if (Number.isFinite(previousLevel)) {
     const previousReaction = getDcaSupportReaction(h4Klines, previousLevel, atr14Pct);
     const anchorPrice = Number(DCA_STATE.stableSupportAnchorPrice);
+    const hardDisplacementPct = Math.max(
+      DCA_HARD_DISPLACEMENT_PCT,
+      safeAtr * DCA_HARD_DISPLACEMENT_ATR_MULTIPLIER
+    );
+    const hardDisplacement = Number.isFinite(price) && price <= previousLevel * (1 - hardDisplacementPct / 100);
     const supportWasMeaningfulWhenSelected = Number.isFinite(anchorPrice)
       ? previousLevel < anchorPrice * (1 - minimumStructuralGapPct / 100)
       : previousLevel < price * (1 - minimumStructuralGapPct / 100);
@@ -5125,11 +5135,11 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     // live-price move, a wick, or a temporary move farther below the level
     // silently replace it with a newer candidate. The next support becomes
     // active only after getDcaSupportReaction() confirms the break.
-    if (!previousReaction.broken && supportWasMeaningfulWhenSelected) {
+    if (!previousReaction.broken && !hardDisplacement && supportWasMeaningfulWhenSelected) {
       return previousLevel;
     }
 
-    if (previousReaction.broken) {
+    if (previousReaction.broken || hardDisplacement) {
       DCA_STATE.stableSupportLevel = null;
       DCA_STATE.stableSupportAnchorPrice = null;
     }
@@ -5436,7 +5446,7 @@ function stabilizeDcaOpportunity(candidate) {
   // A confirmed 4H support break is already a strong invalidation, so it may
   // commit immediately. Every other status transition needs two consistent
   // reads and a short minimum dwell time to prevent UI flicker.
-  const confirmedBreak = candidate.supportReaction === "Broken";
+  const confirmedBreak = candidate.supportReaction === "Broken" || candidate.hardSupportInvalidated === true;
   const enoughSnapshots = DCA_STATE.pendingStatusCount >= DCA_STATUS_CONFIRMATION_SNAPSHOTS;
 
   if (confirmedBreak || enoughSnapshots) {
@@ -5540,6 +5550,19 @@ function buildDcaOpportunity({
   perf7d,
   perf30d,
 }) {
+  const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
+  const priorSupportAnchor = Number(
+    DCA_STATE.stableSupportLevel ??
+    DCA_STATE.stableResult?.supportAnchorLevel ??
+    DCA_STATE.stableResult?.lowerZone?.level
+  );
+  const hardDisplacementPct = Math.max(
+    DCA_HARD_DISPLACEMENT_PCT,
+    safeAtr * DCA_HARD_DISPLACEMENT_ATR_MULTIPLIER
+  );
+  const hardSupportDisplacement = Number.isFinite(priorSupportAnchor) &&
+    Number.isFinite(price) &&
+    price <= priorSupportAnchor * (1 - hardDisplacementPct / 100);
   const nearestLiquidity = ladder?.below?.[0] || null;
   const structuralSupportLevel = getStructuralDcaSupport(
     h4Klines,
@@ -5567,7 +5590,6 @@ function buildDcaOpportunity({
     supportReaction.label
   );
   const macro = getDcaMacroContext(weeklyKlines, price, structuralSupportLevel, atr14Pct);
-  const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
   // Do not turn a missing support into a fake 999% distance. The previous
   // fallback caused the extension branch below to fire and produced messages
   // such as "The nearest lower zone is 999.0% away" even when no valid DCA
@@ -5597,9 +5619,14 @@ function buildDcaOpportunity({
   const upsideCrowding = traps?.longTrap === "High" && Number(rangePos30) > 68;
   const fastExtension = Number(perf7d) > Math.max(safeAtr * 1.4, 3.5) && Number(rangePos30) > 72;
   const slowExtension = Number(perf30d) > 8 && Number(rangePos30) > 75;
+  const supportBreakInvalidated = hardSupportDisplacement && (
+    !Number.isFinite(structuralSupportLevel) ||
+    !Number.isFinite(priorSupportAnchor) ||
+    Math.abs((structuralSupportLevel - priorSupportAnchor) / priorSupportAnchor) > 0.0025
+  );
   const entryContext = (fastExtension || slowExtension || extendedFromSupport)
     ? "Price extended from DCA zone"
-    : supportReaction.broken
+    : supportBreakInvalidated || supportReaction.broken
       ? "Support broken"
       : supportReaction.positive
         ? "Support reaction confirmed"
@@ -5637,6 +5664,7 @@ function buildDcaOpportunity({
     entryContext,
     inLowerRange: lowerRange,
     supportAnchorLevel: structuralSupportLevel,
+    hardSupportInvalidated: supportBreakInvalidated,
     dcaTier: macro.tier,
     macroZone: macro.zone,
     macroContext: macro.context,
@@ -5664,7 +5692,8 @@ function buildDcaOpportunity({
     !nearestSupport ||
     (!nearSupport && !confirmedReaction) ||
     !lowerRange ||
-    supportReaction.broken
+    supportReaction.broken ||
+    supportBreakInvalidated
     // Do not cancel Small DCA merely because pressure is still moving price
     // toward the lower support. Cancel only on a confirmed support break;
     // the approach itself is exactly where a small tactical tranche belongs.
@@ -5676,7 +5705,11 @@ function buildDcaOpportunity({
         ? "A support zone is visible, but price is still too close to it for a sufficiently asymmetric DCA entry."
         : "Price is not yet giving DCA a sufficiently asymmetric entry. A support level alone is not enough to trigger a buy zone.",
       action: "Keep the next tranche in reserve. Wait for a meaningful lower-range test, a real reaction away from support and improving pressure.",
-      rationale: supportReaction.broken
+      rationale: supportBreakInvalidated
+        ? previousSupportLevelText
+          ? `Previous support at ${previousSupportLevelText} was displaced by a hard move. The old DCA tier is invalidated; wait for a new structural zone and reaction.`
+          : "The previous support was displaced by a hard move. The old DCA tier is invalidated; wait for a new structural zone and reaction."
+        : supportReaction.broken
         ? previousSupportLevelText
           ? `Previous support at ${previousSupportLevelText} has been decisively lost. No new structural support is confirmed yet, so wait for the next meaningful lower zone.`
           : "The previous support has been decisively lost. No new structural support is confirmed yet, so wait for the next meaningful lower zone."
@@ -5697,7 +5730,11 @@ function buildDcaOpportunity({
     });
   }
 
-  const constructivePressure = pressure?.bias === "Demand-Dominant" || traps?.shortTrap === "Medium" || traps?.shortTrap === "High";
+  const constructivePressure = pressure?.label !== "Downside Pull" && (
+    pressure?.bias === "Demand-Dominant" ||
+    traps?.shortTrap === "Medium" ||
+    traps?.shortTrap === "High"
+  );
 
   if (confirmedReaction && constructivePressure) {
     if (macro.tier === "Core") {
