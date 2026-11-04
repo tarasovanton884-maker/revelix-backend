@@ -53,6 +53,11 @@ const DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT = 2.5;
 // Strong/Core higher-timeframe zones may remain actionable a little farther
 // away, but even those zones need a finite entry window.
 const DCA_MAX_DEEP_ENTRY_DISTANCE_PCT = 4.5;
+// Do not churn the active structural anchor on every small move. A candidate
+// must be materially separated from the previous anchor before it can become
+// a new zone; at BTC prices this prevents a roughly $1k move from creating a
+// fresh support by itself.
+const DCA_MIN_REANCHOR_DISTANCE_PCT = 1.5;
 
 // User-facing endpoints should not wait indefinitely for a stale snapshot to
 // refresh. Give a refresh a short chance to finish; if an upstream is slow,
@@ -5144,11 +5149,13 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     // active only after getDcaSupportReaction() confirms the break.
     const stableTier = DCA_STATE.stableStatus || "";
     const deepAnchorActive = stableTier === "Strong DCA Zone" || stableTier === "Core Accumulation Zone";
-    const tacticalAnchorExpired = Number.isFinite(price) &&
-      price >= previousLevel * (1 + DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT / 100) &&
-      !deepAnchorActive;
+    const anchorExpiryDistancePct = deepAnchorActive
+      ? DCA_MAX_DEEP_ENTRY_DISTANCE_PCT
+      : DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT;
+    const anchorExpired = Number.isFinite(price) &&
+      price >= previousLevel * (1 + anchorExpiryDistancePct / 100);
 
-    if (!previousReaction.broken && !hardDisplacement && supportWasMeaningfulWhenSelected && !tacticalAnchorExpired) {
+    if (!previousReaction.broken && !hardDisplacement && supportWasMeaningfulWhenSelected && !anchorExpired) {
       return previousLevel;
     }
 
@@ -5156,10 +5163,10 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     // structure to become the active anchor. If no higher support is formed
     // yet, keep the old level only as historical context and let the caller
     // return Pause DCA rather than reviving the old buy signal.
-    if (tacticalAnchorExpired && !previousReaction.broken && !hardDisplacement) {
+    if (anchorExpired && !previousReaction.broken && !hardDisplacement) {
       const higherCandidate = candidates
         .filter((candidate) => (
-          candidate.level > previousLevel * 1.005 &&
+          Math.abs((candidate.level - previousLevel) / previousLevel) * 100 >= DCA_MIN_REANCHOR_DISTANCE_PCT &&
           candidate.level < price * (1 - minimumStructuralGapPct / 100)
         ))
         .sort((a, b) => b.score - a.score || b.level - a.level)[0];
@@ -5611,6 +5618,9 @@ function buildDcaOpportunity({
     atr14Pct,
     nearestLiquidity?.level
   );
+  const supportAnchorChanged = Number.isFinite(priorSupportAnchor) &&
+    Number.isFinite(structuralSupportLevel) &&
+    Math.abs((structuralSupportLevel - priorSupportAnchor) / priorSupportAnchor) * 100 >= DCA_MIN_REANCHOR_DISTANCE_PCT;
   const nearestSupport = structuralSupportLevel ? {
     ...(nearestLiquidity || {}),
     level: structuralSupportLevel,
@@ -5671,6 +5681,10 @@ function buildDcaOpportunity({
     !Number.isFinite(priorSupportAnchor) ||
     Math.abs((structuralSupportLevel - priorSupportAnchor) / priorSupportAnchor) > 0.0025
   );
+  // A new anchor is not an immediate buy signal. The support must first show
+  // a reaction on completed candles; otherwise a live tick can make the new
+  // zone cross the distance threshold and briefly resurrect Small DCA.
+  const newSupportNeedsReaction = supportAnchorChanged && !supportReaction.positive;
   const entryContext = (fastExtension || slowExtension || extendedFromSupport)
     ? "Price extended from DCA zone"
     : supportBreakInvalidated || supportReaction.broken
@@ -5715,6 +5729,7 @@ function buildDcaOpportunity({
     supportAnchorLevel: structuralSupportLevel,
     hardSupportInvalidated: supportBreakInvalidated,
     dcaZoneExpired: zoneTooFarForEntry,
+    newSupportNeedsReaction,
     dcaTier: macro.tier,
     macroZone: macro.zone,
     macroContext: macro.context,
@@ -5743,10 +5758,11 @@ function buildDcaOpportunity({
     (!nearSupport && !confirmedReaction) ||
     !lowerRange ||
     supportReaction.broken ||
-    supportBreakInvalidated
+    supportBreakInvalidated ||
+    newSupportNeedsReaction
     // Do not cancel Small DCA merely because pressure is still moving price
-    // toward the lower support. Cancel only on a confirmed support break;
-    // the approach itself is exactly where a small tactical tranche belongs.
+    // toward the lower support. Cancel on a confirmed break, an expired zone,
+    // or a newly selected support that has not proved itself yet.
   ) {
     return decorateDca({
       ...base,
@@ -5763,6 +5779,8 @@ function buildDcaOpportunity({
         ? previousSupportLevelText
           ? `Previous support at ${previousSupportLevelText} has been decisively lost. No new structural support is confirmed yet, so wait for the next meaningful lower zone.`
           : "The previous support has been decisively lost. No new structural support is confirmed yet, so wait for the next meaningful lower zone."
+        : newSupportNeedsReaction
+          ? "A new structural support has appeared, but its reaction is not confirmed on completed candles yet. Wait for the zone to prove itself before adding a tranche."
         : priceBelowSupport
           ? previousSupportLevelText
             ? `Price is ${priceBelowSupportDistance.toFixed(1)}% below the previous support at ${previousSupportLevelText}. The break is not confirmed yet, so the zone is being monitored before shifting to the next lower support.`
