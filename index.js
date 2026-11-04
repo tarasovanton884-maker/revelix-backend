@@ -46,6 +46,13 @@ const DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT = 0.75;
 // from keeping yesterday's DCA tier alive while a new zone is still forming.
 const DCA_HARD_DISPLACEMENT_PCT = 2.0;
 const DCA_HARD_DISPLACEMENT_ATR_MULTIPLIER = 0.85;
+// A tactical DCA zone must expire once price has moved materially above it.
+// Volatility may widen the structural calculations, but it must not turn an
+// old support into an active buy signal five percent below live price.
+const DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT = 2.5;
+// Strong/Core higher-timeframe zones may remain actionable a little farther
+// away, but even those zones need a finite entry window.
+const DCA_MAX_DEEP_ENTRY_DISTANCE_PCT = 4.5;
 
 // User-facing endpoints should not wait indefinitely for a stale snapshot to
 // refresh. Give a refresh a short chance to finish; if an upstream is slow,
@@ -5135,7 +5142,32 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     // live-price move, a wick, or a temporary move farther below the level
     // silently replace it with a newer candidate. The next support becomes
     // active only after getDcaSupportReaction() confirms the break.
-    if (!previousReaction.broken && !hardDisplacement && supportWasMeaningfulWhenSelected) {
+    const stableTier = DCA_STATE.stableStatus || "";
+    const deepAnchorActive = stableTier === "Strong DCA Zone" || stableTier === "Core Accumulation Zone";
+    const tacticalAnchorExpired = Number.isFinite(price) &&
+      price >= previousLevel * (1 + DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT / 100) &&
+      !deepAnchorActive;
+
+    if (!previousReaction.broken && !hardDisplacement && supportWasMeaningfulWhenSelected && !tacticalAnchorExpired) {
+      return previousLevel;
+    }
+
+    // Once a tactical zone is left behind, allow a newer completed-candle
+    // structure to become the active anchor. If no higher support is formed
+    // yet, keep the old level only as historical context and let the caller
+    // return Pause DCA rather than reviving the old buy signal.
+    if (tacticalAnchorExpired && !previousReaction.broken && !hardDisplacement) {
+      const higherCandidate = candidates
+        .filter((candidate) => (
+          candidate.level > previousLevel * 1.005 &&
+          candidate.level < price * (1 - minimumStructuralGapPct / 100)
+        ))
+        .sort((a, b) => b.score - a.score || b.level - a.level)[0];
+      if (higherCandidate) {
+        DCA_STATE.stableSupportLevel = higherCandidate.level;
+        DCA_STATE.stableSupportAnchorPrice = price;
+        return higherCandidate.level;
+      }
       return previousLevel;
     }
 
@@ -5418,6 +5450,7 @@ function stabilizeDcaOpportunity(candidate) {
     candidate.entryContext !== "Support broken" &&
     candidate.entryContext !== "Price extended from DCA zone" &&
     candidate.hardSupportInvalidated !== true &&
+    candidate.dcaZoneExpired !== true &&
     !(stableTier >= 2 && candidate.pressureLabel === "Downside Pull");
 
   if (earnedTierStillStructurallyValid) {
@@ -5452,7 +5485,9 @@ function stabilizeDcaOpportunity(candidate) {
   // A confirmed 4H support break is already a strong invalidation, so it may
   // commit immediately. Every other status transition needs two consistent
   // reads and a short minimum dwell time to prevent UI flicker.
-  const confirmedBreak = candidate.supportReaction === "Broken" || candidate.hardSupportInvalidated === true;
+  const confirmedBreak = candidate.supportReaction === "Broken" ||
+    candidate.hardSupportInvalidated === true ||
+    candidate.dcaZoneExpired === true;
   const enoughSnapshots = DCA_STATE.pendingStatusCount >= DCA_STATUS_CONFIRMATION_SNAPSHOTS;
 
   if (confirmedBreak || enoughSnapshots) {
@@ -5611,7 +5646,10 @@ function buildDcaOpportunity({
     DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT,
     safeAtr * 0.35
   );
-  const maximumTacticalDistancePct = Math.max(safeAtr * 1.25, 3.25);
+  const deepValueTier = macro.tier === "Strong" || macro.tier === "Core";
+  const maximumTacticalDistancePct = deepValueTier
+    ? Math.min(Math.max(safeAtr * 1.25, 3.0), DCA_MAX_DEEP_ENTRY_DISTANCE_PCT)
+    : DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT;
   const lowerRange = Number(rangePos30) <= 50;
   const nearSupport = hasValidSupport && supportDistance >= minimumDcaDistancePct && supportDistance <= maximumTacticalDistancePct;
   // A confirmed sweep-and-reclaim can justify a small tactical tranche even
@@ -5620,7 +5658,10 @@ function buildDcaOpportunity({
   const confirmedReaction = lowerRange && hasValidSupport && supportDistance <= maximumTacticalDistancePct && supportReaction.positive;
   const supportTooClose = hasValidSupport && supportDistance < minimumDcaDistancePct;
   const deepLowerRange = Number(rangePos30) <= 38;
-  const extendedFromSupport = hasValidSupport && supportDistance >= Math.max(safeAtr * 2.2, 6.5);
+  const zoneTooFarForEntry = hasValidSupport && supportDistance > maximumTacticalDistancePct;
+  const extendedFromSupport = zoneTooFarForEntry || (
+    hasValidSupport && supportDistance >= Math.max(safeAtr * 2.2, 6.5)
+  );
   const downsidePressure = pressure?.label === "Downside Pull";
   const upsideCrowding = traps?.longTrap === "High" && Number(rangePos30) > 68;
   const fastExtension = Number(perf7d) > Math.max(safeAtr * 1.4, 3.5) && Number(rangePos30) > 72;
@@ -5673,6 +5714,7 @@ function buildDcaOpportunity({
     inLowerRange: lowerRange,
     supportAnchorLevel: structuralSupportLevel,
     hardSupportInvalidated: supportBreakInvalidated,
+    dcaZoneExpired: zoneTooFarForEntry,
     dcaTier: macro.tier,
     macroZone: macro.zone,
     macroContext: macro.context,
