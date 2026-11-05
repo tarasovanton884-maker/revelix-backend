@@ -56,8 +56,9 @@ const DCA_MAX_DEEP_ENTRY_DISTANCE_PCT = 4.5;
 // Do not churn the active structural anchor on every small move. A candidate
 // must be materially separated from the previous anchor before it can become
 // a new zone; at BTC prices this prevents a roughly $1k move from creating a
-// fresh support by itself.
-const DCA_MIN_REANCHOR_DISTANCE_PCT = 1.5;
+// fresh support by itself. Two percent is intentionally used here only for
+// re-anchoring, not for reclaiming an existing support.
+const DCA_MIN_REANCHOR_DISTANCE_PCT = 2.0;
 
 // User-facing endpoints should not wait indefinitely for a stale snapshot to
 // refresh. Give a refresh a short chance to finish; if an upstream is slow,
@@ -5364,7 +5365,7 @@ function getDcaSupportDisplay(price, supportLevel, supportReaction) {
     return {
       position: "No clear support",
       distancePct: null,
-      description: "No clear lower support is currently defined.",
+      description: "No confirmed lower support is currently formed.",
     };
   }
 
@@ -5378,8 +5379,8 @@ function getDcaSupportDisplay(price, supportLevel, supportReaction) {
       position: "Price below support",
       distancePct,
       description: reaction === "Broken"
-        ? `Price is ${distancePct.toFixed(1)}% below the previous support at ${levelText}. The break is confirmed.`
-        : `Price is ${distancePct.toFixed(1)}% below the previous support at ${levelText}. The break is not confirmed yet.`,
+        ? `The previous ${levelText} support has broken; a new lower support is not confirmed yet.`
+        : `The ${levelText} support is under pressure, but the move below has not confirmed a breakdown yet.`,
     };
   }
 
@@ -5713,8 +5714,12 @@ function buildDcaOpportunity({
       label: nearestSupport.label,
     } : null,
     supportDescription: supportDisplay.description,
-    supportDistancePct: supportDisplay.distancePct,
-    supportPricePosition: supportDisplay.position,
+    // Never let the legacy UI describe a pierced support as a zone that is
+    // still "X% below price". The anchor price remains available through
+    // supportAnchorLevel/supportDescription, while distance is withheld until
+    // price is back above the support or a new zone is confirmed.
+    supportDistancePct: priceBelowSupport ? null : supportDisplay.distancePct,
+    supportPricePosition: priceBelowSupport ? "Support being tested" : supportDisplay.position,
     liquidityZone: nearestLiquidity ? {
       level: nearestLiquidity.level,
       distancePct: nearestLiquidity.distancePct,
@@ -5741,6 +5746,25 @@ function buildDcaOpportunity({
       presentation: getDcaPresentation(result.status, supportReaction.label, entryContext),
     }),
   });
+
+  // A shallow move below the active support is a monitoring state, not a new
+  // buy zone and not yet a confirmed break. Keep the old anchor and pause new
+  // entries until price either reclaims it (then Small DCA can return after
+  // the normal reaction checks) or closes decisively below it.
+  if (priceBelowSupport && !supportReaction.broken && !supportBreakInvalidated) {
+    return decorateDca({
+      ...base,
+      status: "Pause DCA",
+      intro: previousSupportLevelText
+        ? `Price moved below the previous support at ${previousSupportLevelText}, but the break is not confirmed yet.`
+        : "Price moved below the active support, but the break is not confirmed yet.",
+      action: "Pause new DCA entries. Wait for a reclaim and confirmed reaction, or for a confirmed break to establish the next lower zone.",
+      rationale: previousSupportLevelText
+        ? `Support at ${previousSupportLevelText} is being tested. A wick or shallow drift below the level does not create a new zone.`
+        : "Price is slightly below the active support. The zone remains under review until completed candles confirm either a reclaim or a break.",
+      watch: "A completed-candle reclaim above support for a possible Small DCA reset, or two decisive closes below it before moving to a lower zone.",
+    });
+  }
 
   if (fastExtension || slowExtension || upsideCrowding || extendedFromSupport) {
     return decorateDca({
