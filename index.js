@@ -5460,6 +5460,26 @@ function stabilizeDcaOpportunity(candidate) {
     Number.isFinite(stableSupport) &&
     Number.isFinite(candidateSupport) &&
     Math.abs((candidateSupport - stableSupport) / stableSupport) <= 0.0025;
+  const supportAnchorChanged =
+    Number.isFinite(stableSupport) &&
+    Number.isFinite(candidateSupport) &&
+    !sameSupportAnchor;
+
+  // A newly selected structural support invalidates the old Pause DCA read.
+  // Otherwise the stabilizer can combine the previous intro/rationale (for
+  // example, "break not confirmed" at $75,736) with a fresh lower support in
+  // the same response, producing contradictory card text.
+  if (DCA_STATE.stableStatus === "Pause DCA" && supportAnchorChanged) {
+    DCA_STATE.stableStatus = candidateStatus;
+    DCA_STATE.stableResult = candidate;
+    DCA_STATE.lastStatusCommitAt = now;
+    DCA_STATE.pendingStatus = null;
+    DCA_STATE.pendingStatusCount = 0;
+    DCA_STATE.pendingStatusSinceAt = 0;
+    writePersistentDcaState(now);
+    return candidate;
+  }
+
   const stableTier = dcaStatusRank[DCA_STATE.stableStatus] ?? 0;
   const candidateTier = dcaStatusRank[candidateStatus] ?? 0;
   const earnedTierStillStructurallyValid =
