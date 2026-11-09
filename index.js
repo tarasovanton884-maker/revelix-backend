@@ -105,15 +105,19 @@ const BINANCE_DEFAULT_429_COOLDOWN_MS = 60 * 1000;
 const BINANCE_DEFAULT_418_COOLDOWN_MS = 10 * 60 * 1000;
 const BINANCE_COOLDOWN_LOG_INTERVAL_MS = 60 * 1000;
 
+// Render's filesystem is ephemeral outside the mounted disk. Use /var/data
+// as the safe default so a deploy cannot silently move state into /tmp and
+// reset the DCA anchor. Explicit per-file paths still take precedence.
+const RENDER_DATA_DIR = process.env.RENDER_DISK_MOUNT_PATH || "/var/data";
 const ATTRACTIVENESS_CACHE_FILE =
   process.env.ATTRACTIVENESS_CACHE_FILE ||
-  path.join(process.env.RENDER_DISK_MOUNT_PATH || "/tmp", "revelix_attractiveness_cache.json");
+  path.join(RENDER_DATA_DIR, "revelix_attractiveness_cache.json");
 const MARKET_CYCLE_STATE_CACHE_FILE =
   process.env.MARKET_CYCLE_STATE_CACHE_FILE ||
-  path.join(process.env.RENDER_DISK_MOUNT_PATH || "/tmp", "revelix_market_cycle_state.json");
+  path.join(RENDER_DATA_DIR, "revelix_market_cycle_state.json");
 const DCA_STATE_CACHE_FILE =
   process.env.DCA_STATE_CACHE_FILE ||
-  path.join(process.env.RENDER_DISK_MOUNT_PATH || "/tmp", "revelix_dca_state.json");
+  path.join(RENDER_DATA_DIR, "revelix_dca_state.json");
 const DCA_STATE_SCHEMA_VERSION = 1;
 
 
@@ -5239,7 +5243,18 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
   const previousCandle = candles[candles.length - 2];
   const lastCloseBelow = lastCandle.close < supportLevel * (1 - breakTolerancePct / 100);
   const previousCloseBelow = previousCandle?.close < supportLevel * (1 - breakTolerancePct / 100);
-  const broken = Boolean(lastCloseBelow && previousCloseBelow);
+  // A fast liquidation should not remain in "break not confirmed" after a
+  // completed 4H candle has already closed decisively below the level. Keep
+  // two-close confirmation for a shallow break, but accept one strong close
+  // at the hard 1.5% displacement threshold.
+  // Keep the break evidence for the recent window. After a fast dump the
+  // market can reclaim part of the move before the next request; checking
+  // only the latest candle would then forget the decisive close and revive
+  // the old support after a restart.
+  const decisiveCloseBelow = recentCandles.some((candle) =>
+    candle.close < supportLevel * (1 - 1.5 / 100)
+  );
+  const broken = Boolean(decisiveCloseBelow || (lastCloseBelow && previousCloseBelow));
   const held = supportTested && !broken && lastCandle.close >= supportLevel * (1 - breakTolerancePct / 100);
   const recentSweep = recentCandles.some((candle) => (
     candle.low < supportLevel * (1 - Math.max(safeAtr * 0.25, 0.5) / 100) &&
@@ -5570,7 +5585,10 @@ function writePersistentDcaState(now = Date.now()) {
 
 function hydratePersistentDcaState(now = Date.now()) {
   const persisted = readPersistentDcaState(now);
-  if (!persisted) return;
+  if (!persisted) {
+    console.warn(`[DCA] No persistent state restored from ${DCA_STATE_CACHE_FILE}`);
+    return;
+  }
   DCA_STATE.stableStatus = persisted.stableStatus;
   DCA_STATE.stableResult = persisted.stableResult;
   DCA_STATE.pendingStatus = persisted.pendingStatus || null;
@@ -5583,6 +5601,7 @@ function hydratePersistentDcaState(now = Date.now()) {
   DCA_STATE.stableSupportAnchorPrice = Number.isFinite(Number(persisted.stableSupportAnchorPrice))
     ? Number(persisted.stableSupportAnchorPrice)
     : null;
+  console.log(`[DCA] Restored persistent state from ${DCA_STATE_CACHE_FILE}: ${DCA_STATE.stableStatus}, support=${DCA_STATE.stableSupportLevel ?? "none"}`);
 }
 
 hydratePersistentDcaState();
@@ -5682,12 +5701,7 @@ function buildDcaOpportunity({
   // liquidation the lower structure may not exist yet, and requiring a new
   // level here could leave the old support stuck in Pause DCA. The next zone
   // can be formed and validated independently after the reset.
-  const supportBreakInvalidated = hardSupportDisplacement || (
-    Number.isFinite(priorSupportAnchor) &&
-    Number.isFinite(structuralSupportLevel) &&
-    Math.abs((structuralSupportLevel - priorSupportAnchor) / priorSupportAnchor) > 0.0025 &&
-    supportReaction.broken
-  );
+  const supportBreakInvalidated = hardSupportDisplacement;
   // A new anchor is not an immediate buy signal. The support must first show
   // a reaction on completed candles; otherwise a live tick can make the new
   // zone cross the distance threshold and briefly resurrect Small DCA.
