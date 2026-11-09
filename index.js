@@ -5677,10 +5677,16 @@ function buildDcaOpportunity({
   const upsideCrowding = traps?.longTrap === "High" && Number(rangePos30) > 68;
   const fastExtension = Number(perf7d) > Math.max(safeAtr * 1.4, 3.5) && Number(rangePos30) > 72;
   const slowExtension = Number(perf30d) > 8 && Number(rangePos30) > 75;
-  const supportBreakInvalidated = hardSupportDisplacement && (
-    !Number.isFinite(structuralSupportLevel) ||
-    !Number.isFinite(priorSupportAnchor) ||
-    Math.abs((structuralSupportLevel - priorSupportAnchor) / priorSupportAnchor) > 0.0025
+  // A hard displacement is itself enough to invalidate the old anchor. Do
+  // not wait for a replacement support to be discovered first: during a fast
+  // liquidation the lower structure may not exist yet, and requiring a new
+  // level here could leave the old support stuck in Pause DCA. The next zone
+  // can be formed and validated independently after the reset.
+  const supportBreakInvalidated = hardSupportDisplacement || (
+    Number.isFinite(priorSupportAnchor) &&
+    Number.isFinite(structuralSupportLevel) &&
+    Math.abs((structuralSupportLevel - priorSupportAnchor) / priorSupportAnchor) > 0.0025 &&
+    supportReaction.broken
   );
   // A new anchor is not an immediate buy signal. The support must first show
   // a reaction on completed candles; otherwise a live tick can make the new
