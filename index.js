@@ -5791,7 +5791,11 @@ function buildDcaOpportunity({
   const decorateDca = (result) => ({
     ...stabilizeDcaOpportunity({
       ...result,
-      presentation: getDcaPresentation(result.status, supportReaction.label, entryContext),
+      presentation: getDcaPresentation(
+        result.status,
+        result.supportReaction || supportReaction.label,
+        result.entryContext || entryContext
+      ),
     }),
   });
 
@@ -5824,6 +5828,7 @@ function buildDcaOpportunity({
       supportDescription: "No confirmed local support is formed near current price.",
       supportDistancePct: null,
       supportPricePosition: "No clear local support",
+      entryContext: "Waiting for local support",
       status: "Wait for DCA zone",
       intro: "No confirmed local support is formed near current price yet.",
       action: "Keep the next tranche in reserve. Wait for a new local support zone to form before considering a DCA entry.",
