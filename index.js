@@ -50,6 +50,10 @@ const DCA_HARD_DISPLACEMENT_ATR_MULTIPLIER = 0.85;
 // Volatility may widen the structural calculations, but it must not turn an
 // old support into an active buy signal five percent below live price.
 const DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT = 2.5;
+// A structural level farther than this is useful as macro context, but it is
+// not a local DCA support. Never present a distant multi-percent gap as the
+// "nearest" actionable zone after a liquidation.
+const DCA_MAX_LOCAL_SUPPORT_DISTANCE_PCT = 5.0;
 // Strong/Core higher-timeframe zones may remain actionable a little farther
 // away, but even those zones need a finite entry window.
 const DCA_MAX_DEEP_ENTRY_DISTANCE_PCT = 4.5;
@@ -5081,7 +5085,9 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT,
     safeAtr * 0.35
   );
-  const validFallback = Number.isFinite(fallbackLevel) && fallbackLevel < price * (1 - minimumStructuralGapPct / 100)
+  const validFallback = Number.isFinite(fallbackLevel) &&
+    fallbackLevel < price * (1 - minimumStructuralGapPct / 100) &&
+    fallbackLevel >= price * (1 - DCA_MAX_LOCAL_SUPPORT_DISTANCE_PCT / 100)
     ? fallbackLevel
     : null;
 
@@ -5116,6 +5122,7 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     const right = Math.min(candles[index + 1].open, candles[index + 1].close);
     if (
       bodyLow >= price * (1 - minimumStructuralGapPct / 100) ||
+      bodyLow < price * (1 - DCA_MAX_LOCAL_SUPPORT_DISTANCE_PCT / 100) ||
       bodyLow > left ||
       bodyLow > right
     ) continue;
@@ -5689,6 +5696,7 @@ function buildDcaOpportunity({
     ? nearestSupport.distancePct
     : null;
   const hasValidSupport = Number.isFinite(supportDistance) && supportDistance > 0;
+  const hasLocalSupport = hasValidSupport && supportDistance <= DCA_MAX_LOCAL_SUPPORT_DISTANCE_PCT;
   // DCA should only become actionable in the lower part of the range and
   // while a valid lower support is still meaningfully below price. This avoids
   // turning a $20–$100 tick into a new support or DCA zone.
@@ -5803,6 +5811,24 @@ function buildDcaOpportunity({
         ? `Support at ${previousSupportLevelText} is being tested. A wick or shallow drift below the level does not create a new zone.`
         : "Price is slightly below the active support. The zone remains under review until completed candles confirm either a reclaim or a break.",
       watch: "A completed-candle reclaim above support for a possible Small DCA reset, or two decisive closes below it before moving to a lower zone.",
+    });
+  }
+
+  // A distant structural low is not an actionable local DCA zone. Keep the
+  // read in a neutral waiting state instead of calling it the nearest zone
+  // and showing an 8–10% "support below price" gap.
+  if (!hasLocalSupport && hasValidSupport && extendedFromSupport) {
+    return decorateDca({
+      ...base,
+      lowerZone: null,
+      supportDescription: "No confirmed local support is formed near current price.",
+      supportDistancePct: null,
+      supportPricePosition: "No clear local support",
+      status: "Wait for DCA zone",
+      intro: "No confirmed local support is formed near current price yet.",
+      action: "Keep the next tranche in reserve. Wait for a new local support zone to form before considering a DCA entry.",
+      rationale: "The next structural level is too far below price to serve as an active DCA zone. The market needs a closer local base or a fresh reaction first.",
+      watch: "A new local support forming between current price and the deeper structural zone, followed by a confirmed reaction.",
     });
   }
 
