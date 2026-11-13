@@ -5309,7 +5309,10 @@ function getFastSelloffReboundCandidate(h4Klines, price, atr14Pct) {
 
   const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
   const minSelloffPct = Math.max(4.0, safeAtr * 1.3);
-  const minReboundPct = Math.max(1.8, safeAtr * 0.55);
+  // Do not wait for a large percentage rebound: on a fast V-reversal that
+  // would often trigger only after the tactical entry has already passed.
+  // The closed-candle reaction check below provides the confirmation instead.
+  const minReboundPct = Math.max(0.9, safeAtr * 0.3);
   const recent = candles.slice(-6);
   const lowCandle = recent.reduce((lowest, candle) => candle.low < lowest.low ? candle : lowest, recent[0]);
   const lowIndex = recent.indexOf(lowCandle);
@@ -5320,6 +5323,11 @@ function getFastSelloffReboundCandidate(h4Klines, price, atr14Pct) {
   const selloffPct = ((selloffStart - lowCandle.low) / selloffStart) * 100;
   const reboundPct = ((price - lowCandle.low) / price) * 100;
   if (selloffPct < minSelloffPct || reboundPct < minReboundPct) return null;
+
+  const reactionCandle = recent.slice(lowIndex + 1).some((candle) => (
+    candle.close > candle.open && candle.close > lowCandle.close
+  ));
+  if (!reactionCandle) return null;
 
   // Prefer the candle-body low over the wick so the provisional level is not
   // anchored to a single liquidation print.
