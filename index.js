@@ -5289,6 +5289,48 @@ function getDcaSupportReaction(h4Klines, supportLevel, atr14Pct) {
   };
 }
 
+// A fast liquidation can reverse before a normal pivot is visible. In that
+// case expose a strictly tactical, small-only candidate from completed 4H
+// candles. It is deliberately not treated as confirmed structural support.
+function getFastSelloffReboundCandidate(h4Klines, price, atr14Pct) {
+  if (!Array.isArray(h4Klines) || !Number.isFinite(price) || price <= 0) return null;
+
+  const hasCloseTimes = h4Klines.some((candle) => Number.isFinite(number(candle?.[6], null)));
+  const closedSource = hasCloseTimes
+    ? h4Klines.filter((candle) => number(candle?.[6], null) <= Date.now())
+    : h4Klines.slice(0, -1);
+  const candles = closedSource.slice(-8).map((candle) => ({
+    open: number(candle[1], null),
+    high: number(candle[2], null),
+    low: number(candle[3], null),
+    close: number(candle[4], null),
+  })).filter((candle) => [candle.open, candle.high, candle.low, candle.close].every((value) => Number.isFinite(value) && value > 0));
+  if (candles.length < 4) return null;
+
+  const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
+  const minSelloffPct = Math.max(4.0, safeAtr * 1.3);
+  const minReboundPct = Math.max(1.8, safeAtr * 0.55);
+  const recent = candles.slice(-6);
+  const lowCandle = recent.reduce((lowest, candle) => candle.low < lowest.low ? candle : lowest, recent[0]);
+  const lowIndex = recent.indexOf(lowCandle);
+  if (lowIndex < 1) return null;
+
+  const preLow = recent.slice(0, lowIndex);
+  const selloffStart = Math.max(...preLow.map((candle) => candle.high));
+  const selloffPct = ((selloffStart - lowCandle.low) / selloffStart) * 100;
+  const reboundPct = ((price - lowCandle.low) / price) * 100;
+  if (selloffPct < minSelloffPct || reboundPct < minReboundPct) return null;
+
+  // Prefer the candle-body low over the wick so the provisional level is not
+  // anchored to a single liquidation print.
+  const bodyLow = Math.min(lowCandle.open, lowCandle.close);
+  const level = Math.max(lowCandle.low, bodyLow);
+  const distancePct = ((price - level) / price) * 100;
+  if (distancePct < DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT || distancePct > DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT) return null;
+
+  return { level, distancePct, selloffPct, reboundPct };
+}
+
 function getDcaMacroContext(weeklyKlines, price, supportLevel, atr14Pct) {
   const candles = Array.isArray(weeklyKlines) ? weeklyKlines : [];
   const closes = candles.map((candle) => number(candle[4], null)).filter((value) => Number.isFinite(value) && value > 0);
@@ -5724,6 +5766,9 @@ function buildDcaOpportunity({
   const upsideCrowding = traps?.longTrap === "High" && Number(rangePos30) > 68;
   const fastExtension = Number(perf7d) > Math.max(safeAtr * 1.4, 3.5) && Number(rangePos30) > 72;
   const slowExtension = Number(perf30d) > 8 && Number(rangePos30) > 75;
+  const fastReboundCandidate = !hasLocalSupport
+    ? getFastSelloffReboundCandidate(h4Klines, price, atr14Pct)
+    : null;
   // A hard displacement is itself enough to invalidate the old anchor. Do
   // not wait for a replacement support to be discovered first: during a fast
   // liquidation the lower structure may not exist yet, and requiring a new
@@ -5815,6 +5860,37 @@ function buildDcaOpportunity({
         ? `Support at ${previousSupportLevelText} is being tested. A wick or shallow drift below the level does not create a new zone.`
         : "Price is slightly below the active support. The zone remains under review until completed candles confirm either a reclaim or a break.",
       watch: "A completed-candle reclaim above support for a possible Small DCA reset, or two decisive closes below it before moving to a lower zone.",
+    });
+  }
+
+  // If a liquidation has already produced a meaningful rebound before a
+  // normal pivot is visible, allow only a limited Small DCA entry. This closes
+  // the V-reversal gap without promoting the move to a confirmed/strong zone.
+  if (!hasLocalSupport && fastReboundCandidate && lowerRange && !supportBreakInvalidated) {
+    const provisionalLevel = fastReboundCandidate.level;
+    return decorateDca({
+      ...base,
+      lowerZone: {
+        level: provisionalLevel,
+        distancePct: fastReboundCandidate.distancePct,
+        displayDistancePct: fastReboundCandidate.distancePct,
+        pricePosition: "Provisional support below price",
+        description: `A provisional rebound zone near $${Math.round(provisionalLevel).toLocaleString("en-US")} has formed after a sharp sell-off.`,
+        density: "Low",
+        label: "Tactical rebound zone",
+      },
+      supportAnchorLevel: provisionalLevel,
+      supportDescription: `A provisional rebound zone near $${Math.round(provisionalLevel).toLocaleString("en-US")} has formed after a sharp sell-off.`,
+      supportDistancePct: fastReboundCandidate.distancePct,
+      supportPricePosition: "Provisional support below price",
+      supportReaction: "Tactical rebound",
+      entryContext: "Tactical rebound — limited size",
+      provisionalSupport: true,
+      status: "Small DCA",
+      intro: "Price has rebounded from a sharp sell-off, but a full structural base is not confirmed yet.",
+      action: "Only a small predefined tranche may be considered. Keep most reserve capital available until a proper support reaction forms.",
+      rationale: `A fast rebound has lifted price ${fastReboundCandidate.reboundPct.toFixed(1)}% from the recent liquidation low. This is an early tactical read, not a confirmed DCA zone.`,
+      watch: "Whether the provisional zone holds and develops into a confirmed local support on completed candles.",
     });
   }
 
