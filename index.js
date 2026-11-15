@@ -59,8 +59,9 @@ const DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT = 2.5;
 // "nearest" actionable zone after a liquidation.
 const DCA_MAX_LOCAL_SUPPORT_DISTANCE_PCT = 5.0;
 // Strong/Core higher-timeframe zones may remain actionable a little farther
-// away, but even those zones need a finite entry window.
-const DCA_MAX_DEEP_ENTRY_DISTANCE_PCT = 4.5;
+// away, but even those zones need a finite entry window. Keep this aligned
+// with the intended five-percent deep-zone allowance.
+const DCA_MAX_DEEP_ENTRY_DISTANCE_PCT = 5.0;
 // Do not churn the active structural anchor on every small move. A candidate
 // must be materially separated from the previous anchor before it can become
 // a new zone; at BTC prices this prevents a roughly $1k move from creating a
@@ -5164,7 +5165,16 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     // silently replace it with a newer candidate. The next support becomes
     // active only after getDcaSupportReaction() confirms the break.
     const stableTier = DCA_STATE.stableStatus || "";
-    const deepAnchorActive = stableTier === "Strong DCA Zone" || stableTier === "Core Accumulation Zone";
+    // The displayed DCA signal can remain Small DCA when the underlying
+    // macro structure is already Strong/Core but reaction or pressure is not
+    // strong enough for promotion. Preserve the deeper structural anchor in
+    // that case instead of treating it like a short-lived tactical level.
+    const stableMacroTier = DCA_STATE.stableResult?.dcaTier || "";
+    const deepAnchorActive =
+      stableTier === "Strong DCA Zone" ||
+      stableTier === "Core Accumulation Zone" ||
+      stableMacroTier === "Strong" ||
+      stableMacroTier === "Core";
     const anchorExpiryDistancePct = deepAnchorActive
       ? DCA_MAX_DEEP_ENTRY_DISTANCE_PCT
       : DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT;
