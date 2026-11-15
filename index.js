@@ -5489,26 +5489,9 @@ function stabilizeDcaOpportunity(candidate) {
     DCA_STATE.pendingStatusCount = 0;
     DCA_STATE.pendingStatusSinceAt = 0;
     writePersistentDcaState(now);
-    return candidate;
+    return DCA_STATE.stableResult;
   }
 
-  if (candidateStatus === DCA_STATE.stableStatus) {
-    // Keep all current levels and explanations fresh while the status itself
-    // remains stable.
-    DCA_STATE.stableResult = candidate;
-    DCA_STATE.pendingStatus = null;
-    DCA_STATE.pendingStatusCount = 0;
-    DCA_STATE.pendingStatusSinceAt = 0;
-    writePersistentDcaState(now);
-    return candidate;
-  }
-
-  // Keep an earned DCA tier while the same lower support remains active.
-  // Small price moves can cross distance/macro-zone thresholds and make the
-  // candidate tier weaker even though the structural setup has not changed.
-  // Apply this to every DCA tier, not only Confirmed Small DCA. A real support
-  // break, an extended price move, leaving the lower half of the range, or a
-  // Pause DCA read can still downgrade/invalidate the setup.
   const dcaStatusRank = {
     "Wait for DCA zone": 0,
     "Small DCA": 1,
@@ -5531,7 +5514,49 @@ function stabilizeDcaOpportunity(candidate) {
     Number.isFinite(stableSupport) &&
     Number.isFinite(candidateSupport) &&
     !sameSupportAnchor;
+  const stableReaction = DCA_STATE.stableResult?.supportReaction;
+  const preserveConfirmedReaction =
+    sameSupportAnchor &&
+    (stableReaction === "Held with reaction" || stableReaction === "Swept and reclaimed") &&
+    candidateStatus !== "Pause DCA" &&
+    candidate.supportReaction !== "Broken" &&
+    candidate.hardSupportInvalidated !== true &&
+    candidate.dcaZoneExpired !== true &&
+    candidate.entryContext !== "Support broken" &&
+    candidate.entryContext !== "Price extended from DCA zone";
+  const preserveReactionFields = (result) => {
+    if (!preserveConfirmedReaction) return result;
+    const levelText = Number.isFinite(candidateSupport)
+      ? `$${Math.round(candidateSupport).toLocaleString("en-US")}`
+      : null;
+    const supportDescription = levelText && Number.isFinite(result.supportDistancePct)
+      ? `Support zone at ${levelText} is held with reaction, ${result.supportDistancePct.toFixed(1)}% below price.`
+      : DCA_STATE.stableResult.supportDescription;
+    return {
+      ...result,
+      supportReaction: stableReaction,
+      entryContext: "Support reaction confirmed",
+      supportDescription,
+    };
+  };
 
+  if (candidateStatus === DCA_STATE.stableStatus) {
+    // Keep all current levels and explanations fresh while the status itself
+    // remains stable.
+    DCA_STATE.stableResult = preserveReactionFields(candidate);
+    DCA_STATE.pendingStatus = null;
+    DCA_STATE.pendingStatusCount = 0;
+    DCA_STATE.pendingStatusSinceAt = 0;
+    writePersistentDcaState(now);
+    return DCA_STATE.stableResult;
+  }
+
+  // Keep an earned DCA tier while the same lower support remains active.
+  // Small price moves can cross distance/macro-zone thresholds and make the
+  // candidate tier weaker even though the structural setup has not changed.
+  // Apply this to every DCA tier, not only Confirmed Small DCA. A real support
+  // break, an extended price move, leaving the lower half of the range, or a
+  // Pause DCA read can still downgrade/invalidate the setup.
   // A newly selected structural support invalidates the old Pause DCA read.
   // Otherwise the stabilizer can combine the previous intro/rationale (for
   // example, "break not confirmed" at $75,736) with a fresh lower support in
@@ -5564,8 +5589,9 @@ function stabilizeDcaOpportunity(candidate) {
     !(stableTier >= 2 && candidate.pressureLabel === "Downside Pull");
 
   if (earnedTierStillStructurallyValid) {
+    const stabilizedCandidate = preserveReactionFields(candidate);
     DCA_STATE.stableResult = {
-      ...candidate,
+      ...stabilizedCandidate,
       status: DCA_STATE.stableResult.status,
       intro: DCA_STATE.stableResult.intro,
       action: DCA_STATE.stableResult.action,
@@ -5573,8 +5599,8 @@ function stabilizeDcaOpportunity(candidate) {
       watch: DCA_STATE.stableResult.watch,
       presentation: getDcaPresentation(
         DCA_STATE.stableResult.status,
-        candidate.supportReaction,
-        candidate.entryContext
+        stabilizedCandidate.supportReaction,
+        stabilizedCandidate.entryContext
       ),
     };
     DCA_STATE.pendingStatus = null;
@@ -5617,8 +5643,9 @@ function stabilizeDcaOpportunity(candidate) {
   // Keep the last committed status and its explanation visible until the new
   // state is confirmed. Refresh market levels so the card does not look stale.
   writePersistentDcaState(now);
+  const presentationCandidate = preserveReactionFields(candidate);
   return {
-    ...candidate,
+    ...presentationCandidate,
     status: DCA_STATE.stableResult.status,
     intro: DCA_STATE.stableResult.intro,
     action: DCA_STATE.stableResult.action,
@@ -5626,8 +5653,8 @@ function stabilizeDcaOpportunity(candidate) {
     watch: DCA_STATE.stableResult.watch,
     presentation: getDcaPresentation(
       DCA_STATE.stableResult.status,
-      candidate.supportReaction,
-      candidate.entryContext
+      presentationCandidate.supportReaction,
+      presentationCandidate.entryContext
     ),
   };
 }
