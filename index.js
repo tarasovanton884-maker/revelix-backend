@@ -37,6 +37,10 @@ const DCA_STATE = {
 };
 
 const DCA_STATUS_CONFIRMATION_SNAPSHOTS = 2;
+// Two matching reads should not be enough to flip the card instantly when
+// polling happens in quick succession. Keep ordinary status changes visible
+// for a short dwell period; confirmed breaks still commit immediately.
+const DCA_STATUS_MIN_DWELL_MS = 30 * 1000;
 // A candle body only a few dollars below live price is not a meaningful
 // support zone. Keep a real discount between price and the selected anchor so
 // normal tick movement cannot manufacture a new "support" level.
@@ -5393,13 +5397,19 @@ function getDcaMacroContext(weeklyKlines, price, supportLevel, atr14Pct) {
   if (inDeepValue && weightedConfluence >= 4) tier = "Core";
   else if (inAccumulation && weightedConfluence >= 3) tier = "Strong";
 
+  const supportingLabels = confluence
+    .map((item) => item.label)
+    .filter((label) => label.toLowerCase() !== `${zone.toLowerCase()} zone`);
+
   return {
     tier,
     zone,
     confluenceLabels: confluence.map((item) => item.label),
-    context: confluence.length
-      ? `${zone} overlaps ${confluence.map((item) => item.label).join(" and ")}. This strengthens the zone, but it does not remove downside risk.`
-      : `${zone} is not yet aligned with a major higher-timeframe support cluster. The read remains tactical.`,
+    context: supportingLabels.length
+      ? `${zone} aligns with ${supportingLabels.join(" and ")}. This strengthens the zone, but it does not remove downside risk.`
+      : confluence.length
+        ? `${zone} is active, but no additional higher-timeframe support cluster is aligned yet. This strengthens the context, but it does not remove downside risk.`
+        : `${zone} is not yet aligned with a major higher-timeframe support cluster. The read remains tactical.`,
   };
 }
 
@@ -5590,7 +5600,10 @@ function stabilizeDcaOpportunity(candidate) {
     candidate.dcaZoneExpired === true;
   const enoughSnapshots = DCA_STATE.pendingStatusCount >= DCA_STATUS_CONFIRMATION_SNAPSHOTS;
 
-  if (confirmedBreak || enoughSnapshots) {
+  const dwellElapsed = !DCA_STATE.pendingStatusSinceAt ||
+    now - DCA_STATE.pendingStatusSinceAt >= DCA_STATUS_MIN_DWELL_MS;
+
+  if (confirmedBreak || (enoughSnapshots && dwellElapsed)) {
     DCA_STATE.stableStatus = candidateStatus;
     DCA_STATE.stableResult = candidate;
     DCA_STATE.lastStatusCommitAt = now;
