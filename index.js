@@ -5811,15 +5811,16 @@ function buildDcaOpportunity({
   const lowerRange = Number(rangePos30) <= 50;
   const nearSupport = hasValidSupport && supportDistance >= minimumDcaDistancePct && supportDistance <= maximumTacticalDistancePct;
   // A confirmed sweep-and-reclaim can justify a small tactical tranche even
-  // when price is still very close to support. Ordinary tactical proximity
-  // remains a wait condition; deep structural support gets the explicit
-  // held-support exception below.
+  // when price is still very close to support. Ordinary proximity by itself
+  // remains insufficient; a completed-candle held-support state is the
+  // conservative Small DCA exception below for every structural zone.
   const confirmedReaction = lowerRange && hasValidSupport && supportDistance <= maximumTacticalDistancePct && supportReaction.positive;
-  // For a deep-value / Core macro zone, being close to a support that is
-  // already holding is not a reason to hide Small DCA. The entry is still
-  // intentionally limited to Small DCA; stronger tiers continue to require
-  // a positive reaction and constructive pressure.
-  const deepSupportHeld = deepValueTier && lowerRange && hasValidSupport &&
+  // A support that is already holding should not be blocked by a minimum
+  // percentage gap. This applies to every structural zone: percentages remain
+  // upper safety caps, while structure and completed-candle reaction decide
+  // whether Small DCA is available. Stronger tiers still require their own
+  // positive-reaction and pressure conditions below.
+  const heldSupportEntry = lowerRange && hasValidSupport &&
     supportDistance <= maximumTacticalDistancePct && supportReaction.held &&
     !supportReaction.broken;
   const supportTooClose = hasValidSupport && supportDistance < minimumDcaDistancePct;
@@ -5842,9 +5843,9 @@ function buildDcaOpportunity({
   // can be formed and validated independently after the reset.
   const supportBreakInvalidated = hardSupportDisplacement;
   // A new anchor is not an immediate buy signal. The support must first show
-  // a reaction on completed candles; otherwise a live tick can make the new
-  // zone cross the distance threshold and briefly resurrect Small DCA.
-  const newSupportNeedsReaction = supportAnchorChanged && !supportReaction.positive;
+  // that it is holding on completed candles; a positive-pressure label is not
+  // required yet for the conservative Small DCA state.
+  const newSupportNeedsReaction = supportAnchorChanged && !supportReaction.held;
   const entryContext = (fastExtension || slowExtension || extendedFromSupport)
     ? "Price extended from DCA zone"
     : supportBreakInvalidated || supportReaction.broken
@@ -5992,7 +5993,7 @@ function buildDcaOpportunity({
 
   if (
     !nearestSupport ||
-    (!nearSupport && !confirmedReaction && !deepSupportHeld) ||
+    (!nearSupport && !confirmedReaction && !heldSupportEntry) ||
     !lowerRange ||
     supportReaction.broken ||
     supportBreakInvalidated ||
@@ -6090,13 +6091,13 @@ function buildDcaOpportunity({
     });
   }
 
-  if (deepSupportHeld) {
+  if (heldSupportEntry) {
     return decorateDca({
       ...base,
       status: "Small DCA",
-      intro: "A deep structural support zone is holding beneath price. A small tactical tranche can be considered while stronger confirmation develops.",
+      intro: "A structural support zone is holding beneath price. A small tactical tranche can be considered while stronger confirmation develops.",
       action: "A small predefined tranche can be considered near the held support. Keep reserve capital for a deeper test or stronger confirmation.",
-      rationale: `Deep structural support is being held ${supportDistance.toFixed(1)}% below price, but the reaction is not yet strong enough for a larger DCA tier.`,
+      rationale: `Structural support is being held ${supportDistance.toFixed(1)}% below price, but the reaction is not yet strong enough for a larger DCA tier.`,
       watch: "Whether support continues to hold and develops a confirmed reaction with improving pressure.",
     });
   }
