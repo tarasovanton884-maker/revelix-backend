@@ -5811,9 +5811,17 @@ function buildDcaOpportunity({
   const lowerRange = Number(rangePos30) <= 50;
   const nearSupport = hasValidSupport && supportDistance >= minimumDcaDistancePct && supportDistance <= maximumTacticalDistancePct;
   // A confirmed sweep-and-reclaim can justify a small tactical tranche even
-  // when price is still very close to support. Mere proximity or a support
-  // level that is only being held must remain a wait condition.
+  // when price is still very close to support. Ordinary tactical proximity
+  // remains a wait condition; deep structural support gets the explicit
+  // held-support exception below.
   const confirmedReaction = lowerRange && hasValidSupport && supportDistance <= maximumTacticalDistancePct && supportReaction.positive;
+  // For a deep-value / Core macro zone, being close to a support that is
+  // already holding is not a reason to hide Small DCA. The entry is still
+  // intentionally limited to Small DCA; stronger tiers continue to require
+  // a positive reaction and constructive pressure.
+  const deepSupportHeld = deepValueTier && lowerRange && hasValidSupport &&
+    supportDistance <= maximumTacticalDistancePct && supportReaction.held &&
+    !supportReaction.broken;
   const supportTooClose = hasValidSupport && supportDistance < minimumDcaDistancePct;
   const deepLowerRange = Number(rangePos30) <= 38;
   const zoneTooFarForEntry = hasValidSupport && supportDistance > maximumTacticalDistancePct;
@@ -5984,7 +5992,7 @@ function buildDcaOpportunity({
 
   if (
     !nearestSupport ||
-    (!nearSupport && !confirmedReaction) ||
+    (!nearSupport && !confirmedReaction && !deepSupportHeld) ||
     !lowerRange ||
     supportReaction.broken ||
     supportBreakInvalidated ||
@@ -6079,6 +6087,17 @@ function buildDcaOpportunity({
       action: "A small predefined tranche can be considered, but keep follow-up capital available until pressure improves and the reaction develops further.",
       rationale: `Support is ${supportReaction.label.toLowerCase()}, while broader pressure is ${pressure?.label || "still developing"}. The reaction is positive, but the stronger confirmation threshold has not been met yet.`,
       watch: "Whether support continues to hold and broader pressure improves without renewed downside.",
+    });
+  }
+
+  if (deepSupportHeld) {
+    return decorateDca({
+      ...base,
+      status: "Small DCA",
+      intro: "A deep structural support zone is holding beneath price. A small tactical tranche can be considered while stronger confirmation develops.",
+      action: "A small predefined tranche can be considered near the held support. Keep reserve capital for a deeper test or stronger confirmation.",
+      rationale: `Deep structural support is being held ${supportDistance.toFixed(1)}% below price, but the reaction is not yet strong enough for a larger DCA tier.`,
+      watch: "Whether support continues to hold and develops a confirmed reaction with improving pressure.",
     });
   }
 
