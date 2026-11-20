@@ -5841,7 +5841,16 @@ function buildDcaOpportunity({
   // liquidation the lower structure may not exist yet, and requiring a new
   // level here could leave the old support stuck in Pause DCA. The next zone
   // can be formed and validated independently after the reset.
-  const supportBreakInvalidated = hardSupportDisplacement;
+  // Re-check the anchor that is actually being displayed.  On a cold start
+  // or after a state restore, `priorSupportAnchor` can be empty/stale while
+  // `getStructuralDcaSupport()` restores the last completed-candle support.
+  // Without this second check a fast move could keep showing “break not
+  // confirmed” even after price had displaced the visible level by more than
+  // the hard invalidation threshold.
+  const displayedSupportHardDisplacement = Number.isFinite(structuralSupportLevel) &&
+    Number.isFinite(price) &&
+    price <= structuralSupportLevel * (1 - hardDisplacementPct / 100);
+  const supportBreakInvalidated = hardSupportDisplacement || displayedSupportHardDisplacement;
   // A new anchor is not an immediate buy signal. The support must first show
   // that it is holding on completed candles; a positive-pressure label is not
   // required yet for the conservative Small DCA state.
