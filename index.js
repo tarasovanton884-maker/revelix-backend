@@ -6,7 +6,7 @@ const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BACKEND_BUILD = "v29-visible-support-break-fix";
+const BACKEND_BUILD = "v30-capped-support-invalidation";
 
 console.log(`[BUILD] ${BACKEND_BUILD}`);
 
@@ -53,6 +53,18 @@ const DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT = 0.75;
 // from keeping yesterday's DCA tier alive while a new zone is still forming.
 const DCA_HARD_DISPLACEMENT_PCT = 2.0;
 const DCA_HARD_DISPLACEMENT_ATR_MULTIPLIER = 0.85;
+// ATR may expand during a selloff, but it must not make the invalidation
+// threshold so wide that an old support survives a clearly broken move.
+// Keep the live-price invalidation bounded and deterministic.
+const DCA_HARD_DISPLACEMENT_MAX_PCT = 3.0;
+
+function getDcaHardDisplacementPct(atr14Pct) {
+  const safeAtr = Number.isFinite(atr14Pct) && atr14Pct > 0 ? atr14Pct : 2.5;
+  return Math.min(
+    DCA_HARD_DISPLACEMENT_MAX_PCT,
+    Math.max(DCA_HARD_DISPLACEMENT_PCT, safeAtr * DCA_HARD_DISPLACEMENT_ATR_MULTIPLIER)
+  );
+}
 // A tactical DCA zone must expire once price has moved materially above it.
 // Volatility may widen the structural calculations, but it must not turn an
 // old support into an active buy signal five percent below live price.
@@ -5154,10 +5166,7 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
   if (Number.isFinite(previousLevel)) {
     const previousReaction = getDcaSupportReaction(h4Klines, previousLevel, atr14Pct);
     const anchorPrice = Number(DCA_STATE.stableSupportAnchorPrice);
-    const hardDisplacementPct = Math.max(
-      DCA_HARD_DISPLACEMENT_PCT,
-      safeAtr * DCA_HARD_DISPLACEMENT_ATR_MULTIPLIER
-    );
+    const hardDisplacementPct = getDcaHardDisplacementPct(atr14Pct);
     const hardDisplacement = Number.isFinite(price) && price <= previousLevel * (1 - hardDisplacementPct / 100);
     const supportWasMeaningfulWhenSelected = Number.isFinite(anchorPrice)
       ? previousLevel < anchorPrice * (1 - minimumStructuralGapPct / 100)
@@ -5754,10 +5763,7 @@ function buildDcaOpportunity({
     DCA_STATE.stableResult?.supportAnchorLevel ??
     DCA_STATE.stableResult?.lowerZone?.level
   );
-  const hardDisplacementPct = Math.max(
-    DCA_HARD_DISPLACEMENT_PCT,
-    safeAtr * DCA_HARD_DISPLACEMENT_ATR_MULTIPLIER
-  );
+  const hardDisplacementPct = getDcaHardDisplacementPct(atr14Pct);
   const hardSupportDisplacement = Number.isFinite(priorSupportAnchor) &&
     Number.isFinite(price) &&
     price <= priorSupportAnchor * (1 - hardDisplacementPct / 100);
