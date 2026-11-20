@@ -6,6 +6,9 @@ const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const BACKEND_BUILD = "v29-visible-support-break-fix";
+
+console.log(`[BUILD] ${BACKEND_BUILD}`);
 
 app.use(cors());
 app.use(express.json());
