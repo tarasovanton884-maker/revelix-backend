@@ -6,7 +6,7 @@ const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BACKEND_BUILD = "v30-capped-support-invalidation";
+const BACKEND_BUILD = "v31-tactical-rebound-after-break";
 
 console.log(`[BUILD] ${BACKEND_BUILD}`);
 
@@ -5842,7 +5842,13 @@ function buildDcaOpportunity({
   const upsideCrowding = traps?.longTrap === "High" && Number(rangePos30) > 68;
   const fastExtension = Number(perf7d) > Math.max(safeAtr * 1.4, 3.5) && Number(rangePos30) > 72;
   const slowExtension = Number(perf30d) > 8 && Number(rangePos30) > 75;
-  const fastReboundCandidate = !hasLocalSupport
+  // After a hard selloff, a provisional local level may appear immediately
+  // on the rebound. That level must not suppress the tactical-rebound path:
+  // it still needs candle confirmation before becoming a real DCA zone.
+  const previousSelloffInvalidated =
+    DCA_STATE.stableResult?.hardSupportInvalidated === true ||
+    DCA_STATE.stableResult?.entryContext === "Support broken";
+  const fastReboundCandidate = (!hasLocalSupport || previousSelloffInvalidated)
     ? getFastSelloffReboundCandidate(h4Klines, price, atr14Pct)
     : null;
   // A hard displacement is itself enough to invalidate the old anchor. Do
@@ -5951,7 +5957,13 @@ function buildDcaOpportunity({
   // If a liquidation has already produced a meaningful rebound before a
   // normal pivot is visible, allow only a limited Small DCA entry. This closes
   // the V-reversal gap without promoting the move to a confirmed/strong zone.
-  if (!hasLocalSupport && fastReboundCandidate && lowerRange && !supportBreakInvalidated) {
+  if (
+    fastReboundCandidate &&
+    lowerRange &&
+    !supportReaction.broken &&
+    !supportBreakInvalidated &&
+    (!hasLocalSupport || previousSelloffInvalidated)
+  ) {
     const provisionalLevel = fastReboundCandidate.level;
     return decorateDca({
       ...base,
