@@ -6,7 +6,7 @@ const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BACKEND_BUILD = "v31-tactical-rebound-after-break";
+const BACKEND_BUILD = "v32-tactical-rebound-candle-scan";
 
 console.log(`[BUILD] ${BACKEND_BUILD}`);
 
@@ -5848,9 +5848,12 @@ function buildDcaOpportunity({
   const previousSelloffInvalidated =
     DCA_STATE.stableResult?.hardSupportInvalidated === true ||
     DCA_STATE.stableResult?.entryContext === "Support broken";
-  const fastReboundCandidate = (!hasLocalSupport || previousSelloffInvalidated)
-    ? getFastSelloffReboundCandidate(h4Klines, price, atr14Pct)
-    : null;
+  // Always inspect the recent candles for a sharp-selloff rebound. The helper
+  // itself requires a real rebound from a recent low, so a normal small tick
+  // cannot create a signal. This keeps a provisional support from hiding the
+  // tactical path after a fresh liquidation, including after a restart where
+  // the persisted state may not retain the previous-break flag.
+  const fastReboundCandidate = getFastSelloffReboundCandidate(h4Klines, price, atr14Pct);
   // A hard displacement is itself enough to invalidate the old anchor. Do
   // not wait for a replacement support to be discovered first: during a fast
   // liquidation the lower structure may not exist yet, and requiring a new
@@ -5962,7 +5965,7 @@ function buildDcaOpportunity({
     lowerRange &&
     !supportReaction.broken &&
     !supportBreakInvalidated &&
-    (!hasLocalSupport || previousSelloffInvalidated)
+    (!hasLocalSupport || previousSelloffInvalidated || Boolean(fastReboundCandidate))
   ) {
     const provisionalLevel = fastReboundCandidate.level;
     return decorateDca({
