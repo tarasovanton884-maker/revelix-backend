@@ -6,7 +6,7 @@ const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BACKEND_BUILD = "v32-tactical-rebound-candle-scan";
+const BACKEND_BUILD = "v35-broken-support-reclaim";
 
 console.log(`[BUILD] ${BACKEND_BUILD}`);
 
@@ -65,10 +65,32 @@ function getDcaHardDisplacementPct(atr14Pct) {
     Math.max(DCA_HARD_DISPLACEMENT_PCT, safeAtr * DCA_HARD_DISPLACEMENT_ATR_MULTIPLIER)
   );
 }
+
+function getDcaAnchorExpiryDistancePct() {
+  const stableTier = DCA_STATE.stableStatus || "";
+  const stableMacroTier = DCA_STATE.stableResult?.dcaTier || "";
+  const deepAnchorActive =
+    stableTier === "Strong DCA Zone" ||
+    stableTier === "Core Accumulation Zone" ||
+    stableMacroTier === "Strong" ||
+    stableMacroTier === "Core";
+  return deepAnchorActive
+    ? DCA_MAX_DEEP_ENTRY_DISTANCE_PCT
+    : DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT;
+}
+
+function isDcaAnchorExpired(price, supportLevel) {
+  return Number.isFinite(price) && Number.isFinite(supportLevel) &&
+    price >= supportLevel * (1 + getDcaAnchorExpiryDistancePct() / 100);
+}
 // A tactical DCA zone must expire once price has moved materially above it.
 // Volatility may widen the structural calculations, but it must not turn an
 // old support into an active buy signal five percent below live price.
 const DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT = 2.5;
+// A sharp liquidation rebound may travel a little farther before the app is
+// polled. Keep this separate from ordinary tactical-entry distance: it still
+// requires a completed bullish reaction candle and remains small-only.
+const DCA_MAX_TACTICAL_REBOUND_DISTANCE_PCT = 4.0;
 // A structural level farther than this is useful as macro context, but it is
 // not a local DCA support. Never present a distant multi-percent gap as the
 // "nearest" actionable zone after a liquidation.
@@ -142,7 +164,9 @@ const MARKET_CYCLE_STATE_CACHE_FILE =
 const DCA_STATE_CACHE_FILE =
   process.env.DCA_STATE_CACHE_FILE ||
   path.join(RENDER_DATA_DIR, "revelix_dca_state.json");
-const DCA_STATE_SCHEMA_VERSION = 1;
+// Bump this whenever the DCA anchor lifecycle changes. A persisted state from
+// an older lifecycle must never be allowed to keep an obsolete support alive.
+const DCA_STATE_SCHEMA_VERSION = 3;
 
 
 function isValidTicker(ticker) {
@@ -426,6 +450,9 @@ function refreshCacheInBackground(key, ttlMs, fn, options = {}) {
 // 2) expired but valid snapshot -> return immediately and refresh in background;
 // 3) no snapshot yet -> wait once for the initial calculation.
 async function withStaleWhileRevalidate(key, ttlMs, fn, options = {}) {
+  const staleWaitMs = Number.isFinite(Number(options.staleWaitMs))
+    ? Math.max(0, Number(options.staleWaitMs))
+    : USER_SNAPSHOT_REFRESH_WAIT_MS;
   const fresh = getCache(key);
   if (fresh !== null) {
     return { value: fresh, cacheStatus: "fresh" };
@@ -443,7 +470,7 @@ async function withStaleWhileRevalidate(key, ttlMs, fn, options = {}) {
     try {
       const refreshed = await Promise.race([
         refreshPromise,
-        new Promise((resolve) => setTimeout(() => resolve(null), USER_SNAPSHOT_REFRESH_WAIT_MS)),
+        new Promise((resolve) => setTimeout(() => resolve(null), staleWaitMs)),
       ]);
 
       if (refreshed !== null && refreshed !== undefined) {
@@ -5110,8 +5137,16 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     fallbackLevel >= price * (1 - DCA_MAX_LOCAL_SUPPORT_DISTANCE_PCT / 100)
     ? fallbackLevel
     : null;
+  const previousLevel = DCA_STATE.stableSupportLevel;
 
   if (!Array.isArray(h4Klines) || !h4Klines.length || !Number.isFinite(price) || price <= 0) {
+    // A stale/failed candle fetch must never resurrect an expired persisted
+    // anchor through the liquidity fallback.
+    if (Number.isFinite(previousLevel) && isDcaAnchorExpired(price, previousLevel)) {
+      DCA_STATE.stableSupportLevel = null;
+      DCA_STATE.stableSupportAnchorPrice = null;
+      return null;
+    }
     if (validFallback) {
       DCA_STATE.stableSupportLevel = validFallback;
       DCA_STATE.stableSupportAnchorPrice = price;
@@ -5129,7 +5164,15 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     close: number(candle[4], null),
   })).filter((candle) => [candle.open, candle.high, candle.low, candle.close].every((value) => Number.isFinite(value) && value > 0));
 
-  if (candles.length < 5) return validFallback;
+  if (candles.length < 5) {
+    // Do not let an incomplete candle snapshot revive an expired support.
+    if (Number.isFinite(previousLevel) && isDcaAnchorExpired(price, previousLevel)) {
+      DCA_STATE.stableSupportLevel = null;
+      DCA_STATE.stableSupportAnchorPrice = null;
+      return null;
+    }
+    return validFallback;
+  }
 
   const clusterTolerancePct = Math.max(safeAtr * 0.35, 0.6);
   const touchTolerancePct = Math.max(safeAtr * 0.45, 0.9);
@@ -5162,7 +5205,6 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
   // while price approaches it, wicks through it, or trades slightly below it.
   // The 0.75% gap is only for selecting a NEW anchor; it must not invalidate
   // an already established support just because live price moved closer.
-  const previousLevel = DCA_STATE.stableSupportLevel;
   if (Number.isFinite(previousLevel)) {
     const previousReaction = getDcaSupportReaction(h4Klines, previousLevel, atr14Pct);
     const anchorPrice = Number(DCA_STATE.stableSupportAnchorPrice);
@@ -5176,31 +5218,20 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
     // live-price move, a wick, or a temporary move farther below the level
     // silently replace it with a newer candidate. The next support becomes
     // active only after getDcaSupportReaction() confirms the break.
-    const stableTier = DCA_STATE.stableStatus || "";
     // The displayed DCA signal can remain Small DCA when the underlying
     // macro structure is already Strong/Core but reaction or pressure is not
     // strong enough for promotion. Preserve the deeper structural anchor in
     // that case instead of treating it like a short-lived tactical level.
-    const stableMacroTier = DCA_STATE.stableResult?.dcaTier || "";
-    const deepAnchorActive =
-      stableTier === "Strong DCA Zone" ||
-      stableTier === "Core Accumulation Zone" ||
-      stableMacroTier === "Strong" ||
-      stableMacroTier === "Core";
-    const anchorExpiryDistancePct = deepAnchorActive
-      ? DCA_MAX_DEEP_ENTRY_DISTANCE_PCT
-      : DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT;
-    const anchorExpired = Number.isFinite(price) &&
-      price >= previousLevel * (1 + anchorExpiryDistancePct / 100);
+    const anchorExpired = isDcaAnchorExpired(price, previousLevel);
 
     if (!previousReaction.broken && !hardDisplacement && supportWasMeaningfulWhenSelected && !anchorExpired) {
       return previousLevel;
     }
 
-    // Once a tactical zone is left behind, allow a newer completed-candle
+    // Once a tactical/deep zone is left behind, allow a newer completed-candle
     // structure to become the active anchor. If no higher support is formed
-    // yet, keep the old level only as historical context and let the caller
-    // return Pause DCA rather than reviving the old buy signal.
+    // yet, the old level must not remain an active anchor: otherwise the
+    // caller can keep displaying Pause DCA against a stale support forever.
     if (anchorExpired && !previousReaction.broken && !hardDisplacement) {
       const higherCandidate = candidates
         .filter((candidate) => (
@@ -5213,7 +5244,9 @@ function getStructuralDcaSupport(h4Klines, price, atr14Pct, fallbackLevel) {
         DCA_STATE.stableSupportAnchorPrice = price;
         return higherCandidate.level;
       }
-      return previousLevel;
+      DCA_STATE.stableSupportLevel = null;
+      DCA_STATE.stableSupportAnchorPrice = null;
+      return null;
     }
 
     if (previousReaction.broken || hardDisplacement) {
@@ -5360,7 +5393,7 @@ function getFastSelloffReboundCandidate(h4Klines, price, atr14Pct) {
   const bodyLow = Math.min(lowCandle.open, lowCandle.close);
   const level = Math.max(lowCandle.low, bodyLow);
   const distancePct = ((price - level) / price) * 100;
-  if (distancePct < DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT || distancePct > DCA_MAX_TACTICAL_ENTRY_DISTANCE_PCT) return null;
+  if (distancePct < DCA_MIN_MEANINGFUL_SUPPORT_GAP_PCT || distancePct > DCA_MAX_TACTICAL_REBOUND_DISTANCE_PCT) return null;
 
   return { level, distancePct, selloffPct, reboundPct };
 }
@@ -5491,6 +5524,14 @@ function getDcaSupportDisplay(price, supportLevel, supportReaction) {
   const reactionText = reaction === "Not yet tested" || reaction === "Unconfirmed"
     ? "reaction is not confirmed yet"
     : reaction.toLowerCase();
+
+  if (reaction === "Broken") {
+    return {
+      position: "Previous support broken — price reclaimed above",
+      distancePct,
+      description: `Previous support at ${levelText} was broken, but price is now ${distancePct.toFixed(1)}% above that level. A new support is not confirmed yet.`,
+    };
+  }
 
   return {
     position: "Support below price",
@@ -5774,6 +5815,12 @@ function buildDcaOpportunity({
     atr14Pct,
     nearestLiquidity?.level
   );
+  // If the previous anchor has expired upward and no completed-candle
+  // replacement was found, do not let the persisted/old result keep the
+  // stale support alive. The caller must move to Wait for DCA zone.
+  const expiredPreviousAnchor = Number.isFinite(priorSupportAnchor) &&
+    isDcaAnchorExpired(price, priorSupportAnchor);
+  const staleAnchorCleared = expiredPreviousAnchor && !Number.isFinite(structuralSupportLevel);
   const supportAnchorChanged = Number.isFinite(priorSupportAnchor) &&
     Number.isFinite(structuralSupportLevel) &&
     Math.abs((structuralSupportLevel - priorSupportAnchor) / priorSupportAnchor) * 100 >= DCA_MIN_REANCHOR_DISTANCE_PCT;
@@ -5920,7 +5967,7 @@ function buildDcaOpportunity({
     inLowerRange: lowerRange,
     supportAnchorLevel: structuralSupportLevel,
     hardSupportInvalidated: supportBreakInvalidated,
-    dcaZoneExpired: zoneTooFarForEntry,
+    dcaZoneExpired: zoneTooFarForEntry || staleAnchorCleared,
     newSupportNeedsReaction,
     dcaTier: macro.tier,
     macroZone: macro.zone,
@@ -5965,7 +6012,7 @@ function buildDcaOpportunity({
     lowerRange &&
     !supportReaction.broken &&
     !supportBreakInvalidated &&
-    (!hasLocalSupport || previousSelloffInvalidated || Boolean(fastReboundCandidate))
+    (!hasLocalSupport || previousSelloffInvalidated)
   ) {
     const provisionalLevel = fastReboundCandidate.level;
     return decorateDca({
@@ -5991,6 +6038,27 @@ function buildDcaOpportunity({
       action: "Only a small predefined tranche may be considered. Keep most reserve capital available until a proper support reaction forms.",
       rationale: `A fast rebound has lifted price ${fastReboundCandidate.reboundPct.toFixed(1)}% from the recent liquidation low. This is an early tactical read, not a confirmed DCA zone.`,
       watch: "Whether the provisional zone holds and develops into a confirmed local support on completed candles.",
+    });
+  }
+
+  // A previously confirmed break remains historical evidence even after
+  // price reclaims the old level. Do not describe that old level as the
+  // current support being broken, and do not let an old reclaimed anchor
+  // become a Pause DCA entry. Wait for a new completed-candle support.
+  if (supportReaction.broken && !priceBelowSupport) {
+    return decorateDca({
+      ...base,
+      lowerZone: null,
+      supportDescription: supportDisplay.description,
+      supportDistancePct: null,
+      supportPricePosition: "Previous support broken — price reclaimed above",
+      entryContext: "Previous support broken — waiting for new support",
+      dcaZoneExpired: true,
+      status: "Wait for DCA zone",
+      intro: "The previous support was broken and price has moved back above it, but no new support is confirmed yet.",
+      action: "Do not add a new DCA tranche here. Wait for a fresh local support to form and hold on completed candles.",
+      rationale: supportDisplay.description,
+      watch: "A new local support forming below price, followed by a confirmed reaction and improving pressure.",
     });
   }
 
@@ -7876,7 +7944,7 @@ app.get("/api/dashboard", async (_req, res) => {
       "dashboard",
       DASHBOARD_TTL,
       getDashboardPayload,
-      { allowStaleOnError: true }
+      { allowStaleOnError: true, staleWaitMs: 5000 }
     );
     logEndpointTiming("dashboard", startedAt, result.cacheStatus);
     res.json(withUnifiedDisplayPrice(result.value));
@@ -7894,7 +7962,7 @@ app.get("/api/market-data", async (_req, res) => {
       "market-data",
       MARKET_DATA_TTL,
       getMarketDataPayload,
-      { allowStaleOnError: true }
+      { allowStaleOnError: true, staleWaitMs: 5000 }
     );
     logEndpointTiming("market-data", startedAt, result.cacheStatus);
     res.json(withUnifiedDisplayPrice(result.value));
