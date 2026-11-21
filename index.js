@@ -6,7 +6,7 @@ const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BACKEND_BUILD = "v35-broken-support-reclaim";
+const BACKEND_BUILD = "v37-neutral-wait-reclaim";
 
 console.log(`[BUILD] ${BACKEND_BUILD}`);
 
@@ -166,7 +166,7 @@ const DCA_STATE_CACHE_FILE =
   path.join(RENDER_DATA_DIR, "revelix_dca_state.json");
 // Bump this whenever the DCA anchor lifecycle changes. A persisted state from
 // an older lifecycle must never be allowed to keep an obsolete support alive.
-const DCA_STATE_SCHEMA_VERSION = 3;
+const DCA_STATE_SCHEMA_VERSION = 5;
 
 
 function isValidTicker(ticker) {
@@ -5527,9 +5527,13 @@ function getDcaSupportDisplay(price, supportLevel, supportReaction) {
 
   if (reaction === "Broken") {
     return {
-      position: "Previous support broken — price reclaimed above",
-      distancePct,
-      description: `Previous support at ${levelText} was broken, but price is now ${distancePct.toFixed(1)}% above that level. A new support is not confirmed yet.`,
+      // A historical candle break must never be rendered as the current
+      // support state after price has reclaimed the old level. The old
+      // wording created the contradiction "support broken" + "X% below
+      // price" and made an invalidated anchor look actionable.
+      position: "No clear local support",
+      distancePct: null,
+      description: "No confirmed local support is formed near current price yet.",
     };
   }
 
@@ -5832,6 +5836,7 @@ function buildDcaOpportunity({
   } : null;
   const supportReaction = getDcaSupportReaction(h4Klines, structuralSupportLevel, atr14Pct);
   const priceBelowSupport = Boolean(nearestSupport && nearestSupport.distancePct < 0);
+  const reclaimedBrokenSupport = supportReaction.broken && !priceBelowSupport;
   const priceBelowSupportDistance = priceBelowSupport
     ? Math.abs(nearestSupport.distancePct)
     : null;
@@ -5922,7 +5927,7 @@ function buildDcaOpportunity({
   const newSupportNeedsReaction = supportAnchorChanged && !supportReaction.held;
   const entryContext = (fastExtension || slowExtension || extendedFromSupport)
     ? "Price extended from DCA zone"
-    : supportBreakInvalidated || supportReaction.broken
+    : supportBreakInvalidated || (supportReaction.broken && priceBelowSupport)
       ? "Support broken"
       : supportReaction.positive
         ? "Support reaction confirmed"
@@ -5967,6 +5972,7 @@ function buildDcaOpportunity({
     inLowerRange: lowerRange,
     supportAnchorLevel: structuralSupportLevel,
     hardSupportInvalidated: supportBreakInvalidated,
+    reclaimedBrokenSupport,
     dcaZoneExpired: zoneTooFarForEntry || staleAnchorCleared,
     newSupportNeedsReaction,
     dcaTier: macro.tier,
@@ -6045,20 +6051,20 @@ function buildDcaOpportunity({
   // price reclaims the old level. Do not describe that old level as the
   // current support being broken, and do not let an old reclaimed anchor
   // become a Pause DCA entry. Wait for a new completed-candle support.
-  if (supportReaction.broken && !priceBelowSupport) {
+  if (reclaimedBrokenSupport) {
     return decorateDca({
       ...base,
       lowerZone: null,
-      supportDescription: supportDisplay.description,
+      supportDescription: "No confirmed local support is formed near current price yet.",
       supportDistancePct: null,
-      supportPricePosition: "Previous support broken — price reclaimed above",
-      entryContext: "Previous support broken — waiting for new support",
+      supportPricePosition: "No clear local support",
+      entryContext: "Waiting for local support",
       dcaZoneExpired: true,
       status: "Wait for DCA zone",
-      intro: "The previous support was broken and price has moved back above it, but no new support is confirmed yet.",
-      action: "Do not add a new DCA tranche here. Wait for a fresh local support to form and hold on completed candles.",
-      rationale: supportDisplay.description,
-      watch: "A new local support forming below price, followed by a confirmed reaction and improving pressure.",
+      intro: "No confirmed local support is formed near current price yet.",
+      action: "Keep the next tranche in reserve. Wait for a new local support zone to form before considering a DCA entry.",
+      rationale: "The previous support is no longer an active DCA zone. The market needs a closer local base or a fresh reaction first.",
+      watch: "A new local support forming near current price, followed by a confirmed reaction and improving pressure.",
     });
   }
 
